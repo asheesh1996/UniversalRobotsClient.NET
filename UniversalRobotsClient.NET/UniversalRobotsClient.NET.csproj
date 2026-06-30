@@ -1,0 +1,22 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>UniversalRobotsClient.NET</RootNamespace>
+    <AssemblyName>UniversalRobotsClient.NET</AssemblyName>
+    <Description>Native managed C# client library for Universal Robots robot controllers. Implements RTDE, Primary, Dashboard, and motion control protocols.</Description>
+    <Authors>Asheesh Maheshwari</Authors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Microsoft BCL package for JSON parsing (PolyScope X REST API) -->
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <!-- Microsoft.Extensions.Logging.Abstractions for pluggable logging -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+  </ItemGroup>
+
+</Project>

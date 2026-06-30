@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/UniversalRobotsClient.NET.Examples/">
+    <Project Path="UniversalRobotsClient.NET.Examples/UniversalRobotsClient.NET.Examples.csproj" />
+  </Folder>
+  <Folder Name="/UniversalRobotsClient.NET/">
+    <Project Path="UniversalRobotsClient.NET/UniversalRobotsClient.NET.csproj" />
+  </Folder>
+  <Folder Name="/UniversalRobotsClient.NET.Test/">
+    <Project Path="UniversalRobotsClient.NET.Test/UniversalRobotsClient.NET.Test.csproj" />
+  </Folder>
+</Solution>
