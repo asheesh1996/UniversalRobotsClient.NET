@@ -86,6 +86,9 @@ namespace UniversalRobotics.Rtde
         private DataPackage? _dataPackage;
         private RtdeWriter? _writer;
         private ushort _protocolVersion;
+        // Maximum RTDE output frequency — CB3 (PolyScope < 5) = 125 Hz, e-Series/PolyScope X = 500 Hz.
+        // Set after QueryUrControlVersionAsync; defaults to 500 Hz until then.
+        private double _maxFrequency = 500.0;
 
         // Background reader state
         private CancellationTokenSource? _backgroundReaderCts;
@@ -175,9 +178,11 @@ namespace UniversalRobotics.Rtde
                 try
                 {
                     await NegotiateProtocolVersionAsync(cancellationToken).ConfigureAwait(false);
+                    await QueryUrControlVersionAsync(cancellationToken).ConfigureAwait(false);
                     await SetupOutputRecipeAsync(cancellationToken).ConfigureAwait(false);
                     if (_inputRecipe.Count > 0)
                         await SetupInputRecipeAsync(cancellationToken).ConfigureAwait(false);
+                    await EnsureRtdeBootedAsync(cancellationToken).ConfigureAwait(false);
 
                     _clientState = ClientState.Initialized;
                     _logger.LogInformation("RTDE initialized (protocol v{Version}).", _protocolVersion);
@@ -279,7 +284,119 @@ namespace UniversalRobotics.Rtde
             return false;
         }
 
+        /// <summary>
+        /// Reads the next RTDE <see cref="DataPackage"/> directly from the socket and returns it.
+        /// Non-DataPackage packets (e.g., text messages) are silently skipped.
+        /// Use this when <see cref="StartAsync"/> was called with <c>readInBackground = false</c>.
+        /// Throws on connection errors, allowing callers to handle reconnection.
+        /// </summary>
+        public async Task<DataPackage?> GetNextDataPackageAsync(CancellationToken cancellationToken = default)
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var (buffer, length) = await _stream.ReadPacketAsync(cancellationToken).ConfigureAwait(false);
+                if (_parser.TryParse(buffer, length, out var pkg) && pkg is DataPackage dp)
+                    return dp;
+                // Skip non-DataPackage packets (TextMessage, etc.)
+            }
+            return null;
+        }
+
         // ─── Handshake helpers ────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Queries the URControl software version (GET_URCONTROL_VERSION) and uses it to set
+        /// the maximum allowed RTDE output frequency for this robot type.
+        /// Matches C++ RTDEClient::queryURControlVersion() + setTargetFrequency().
+        /// </summary>
+        private async Task QueryUrControlVersionAsync(CancellationToken ct)
+        {
+            var pkg = new GetUrControlVersionPackage();
+            await SendAndReceiveAsync(pkg, ct).ConfigureAwait(false);
+            _logger.LogDebug("URControl version: {Maj}.{Min}.{Bug}.{Bld}",
+                pkg.Major, pkg.Minor, pkg.Bugfix, pkg.Build);
+            // CB3 (PolyScope < 5) maxes out at 125 Hz; e-Series / PolyScope X support 500 Hz.
+            _maxFrequency = pkg.Major < 5 ? 125.0 : 500.0;
+        }
+
+        /// <summary>
+        /// Primes the RTDE stream by performing a start → read-at-least-one-packet → pause cycle.
+        /// Mirrors C++ RTDEClient::isRobotBooted(): without this cycle URSim accepts ControlStart
+        /// but never emits data packets on the subsequent real <see cref="StartAsync"/> call.
+        /// </summary>
+        private async Task EnsureRtdeBootedAsync(CancellationToken ct)
+        {
+            // 1. Send ControlStart
+            var startPkg = new ControlStartPackage();
+            await SendAndReceiveAsync(startPkg, ct).ConfigureAwait(false);
+            if (!startPkg.Accepted)
+            {
+                _logger.LogWarning("ControlStart not accepted during boot-check; skipping.");
+                return;
+            }
+
+            // 2. Read packets for up to 3 s. C++ exits when timestamp >= 40 s (robot fully up)
+            //    OR after 2*target_frequency packets. We stop after the first packet whose
+            //    timestamp ≥ 40 s, or after the 3-second window closes.
+            double timestamp = 0.0;
+            int packetsRead = 0;
+            using var bootCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var linked  = CancellationTokenSource.CreateLinkedTokenSource(ct, bootCts.Token);
+
+            while (!linked.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    var (buf, len) = await _stream.ReadPacketAsync(linked.Token).ConfigureAwait(false);
+                    if (_parser.TryParse(buf, len, out var parsed) && parsed is DataPackage dp)
+                    {
+                        dp.GetData<double>("timestamp", out timestamp);
+                        packetsRead++;
+                        if (timestamp >= 40.0) break;  // robot has been running ≥ 40 s
+                    }
+                }
+                catch (OperationCanceledException) { break; }
+            }
+
+            _logger.LogDebug("RTDE boot-check: {N} packet(s), timestamp={Ts:F1} s.",
+                packetsRead, timestamp);
+
+            // 3. Send ControlPause; drain any in-flight DataPackages before the pause response.
+            await SendPauseWithDrainAsync(ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Sends ControlPause and waits up to 5 s for the acceptance response,
+        /// discarding any DataPackage packets that arrive before it.
+        /// </summary>
+        private async Task SendPauseWithDrainAsync(CancellationToken ct)
+        {
+            var pausePkg = new ControlPausePackage();
+            await _stream.WriteAsync(pausePkg.Serialize(), ct).ConfigureAwait(false);
+
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var linked    = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+
+            while (!linked.Token.IsCancellationRequested)
+            {
+                byte[] buffer; int length;
+                try
+                {
+                    (buffer, length) = await _stream.ReadPacketAsync(linked.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { break; }
+
+                if (_parser.TryParse(buffer, length, out var resp) &&
+                    resp?.PackageType == RtdePackageType.ControlPackagePause)
+                {
+                    pausePkg.ParseFrom(new BinaryParser(buffer, 3, length - 3));
+                    _logger.LogDebug("RTDE paused (accepted={Accepted}).", pausePkg.Accepted);
+                    return;
+                }
+            }
+
+            _logger.LogWarning("Did not receive ControlPause response within 5 s.");
+        }
 
         private async Task NegotiateProtocolVersionAsync(CancellationToken ct)
         {
@@ -290,6 +407,7 @@ namespace UniversalRobotics.Rtde
                 if (req.Accepted)
                 {
                     _protocolVersion = version;
+                    _parser.SetProtocolVersion(version);
                     return;
                 }
             }
@@ -298,7 +416,11 @@ namespace UniversalRobotics.Rtde
 
         private async Task SetupOutputRecipeAsync(CancellationToken ct)
         {
-            var pkg = new SetupOutputsPackage(_outputRecipe, _targetFrequency);
+            // Use the max frequency determined from the URControl version when no explicit
+            // frequency was requested. Sending 0.0 Hz to URSim causes it to accept the
+            // recipe but silently refuse to stream data after ControlStart.
+            double frequency = _targetFrequency > 0.0 ? _targetFrequency : _maxFrequency;
+            var pkg = new SetupOutputsPackage(_outputRecipe, frequency, _protocolVersion);
             await SendAndReceiveAsync(pkg, ct).ConfigureAwait(false);
 
             for (int i = 0; i < pkg.VariableTypes.Count; i++)

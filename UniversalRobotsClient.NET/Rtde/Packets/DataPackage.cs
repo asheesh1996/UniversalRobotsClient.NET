@@ -119,6 +119,10 @@ namespace UniversalRobotics.Rtde.Packets
         /// <inheritdoc />
         public override bool ParseFrom(BinaryParser parser)
         {
+            // Protocol v2: every data packet starts with a 1-byte recipe_id before the field data.
+            if (_protocolVersion == 2)
+                parser.ReadByte(); // consume recipe_id
+
             for (int i = 0; i < _recipe.Count; i++)
             {
                 if (!_fieldMeta.TryGetValue(_recipe[i], out var meta) || meta.kind == RtdeValueKind.None)

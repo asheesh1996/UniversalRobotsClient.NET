@@ -12,6 +12,7 @@ namespace UniversalRobotics.Rtde.Packets
     {
         private readonly System.Collections.Generic.IReadOnlyList<string> _outputRecipe;
         private DataPackage? _preallocatedDataPackage;
+        private ushort _protocolVersion = 1;
 
         /// <summary>
         /// Creates a new parser for the given output recipe.
@@ -22,10 +23,19 @@ namespace UniversalRobotics.Rtde.Packets
             _outputRecipe = outputRecipe;
         }
 
+        /// <summary>Updates the negotiated RTDE protocol version used for parsing.</summary>
+        internal void SetProtocolVersion(ushort version)
+        {
+            _protocolVersion = version;
+            // Re-create the preallocated package so it picks up the new protocol version.
+            if (_preallocatedDataPackage != null)
+                _preallocatedDataPackage.ProtocolVersion = version;
+        }
+
         /// <summary>Updates the field type metadata after the setup handshake is complete.</summary>
         internal void SetFieldTypes(System.Collections.Generic.IReadOnlyList<string> fieldTypes)
         {
-            _preallocatedDataPackage ??= new DataPackage(_outputRecipe);
+            _preallocatedDataPackage ??= new DataPackage(_outputRecipe, protocolVersion: _protocolVersion);
             _preallocatedDataPackage.SetFieldTypes(fieldTypes);
         }
 
@@ -42,7 +52,7 @@ namespace UniversalRobotics.Rtde.Packets
             {
                 RtdePackageType.RequestProtocolVersion => ParseAndFill(new RequestProtocolVersionPackage(), parser),
                 RtdePackageType.GetUrControlVersion => ParseAndFill(new GetUrControlVersionPackage(), parser),
-                RtdePackageType.ControlPackageSetupOutputs => ParseAndFill(new SetupOutputsPackage(System.Array.Empty<string>()), parser),
+                RtdePackageType.ControlPackageSetupOutputs => ParseAndFill(new SetupOutputsPackage(System.Array.Empty<string>(), protocolVersion: _protocolVersion), parser),
                 RtdePackageType.ControlPackageSetupInputs => ParseAndFill(new SetupInputsPackage(System.Array.Empty<string>()), parser),
                 RtdePackageType.ControlPackageStart => ParseAndFill(new ControlStartPackage(), parser),
                 RtdePackageType.ControlPackagePause => ParseAndFill(new ControlPausePackage(), parser),

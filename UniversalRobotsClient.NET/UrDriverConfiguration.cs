@@ -14,7 +14,7 @@ namespace UniversalRobotics
         /// <summary>Gets or sets the robot's IP address.</summary>
         public string RobotIp { get; set; } = string.Empty;
 
-        /// <summary>Gets or sets the path to the URScript file (used with <see cref="ScriptSender"/>).</summary>
+        /// <summary>Gets or sets the path to the URScript file (used with the script sender).</summary>
         public string? ScriptFile { get; set; }
 
         /// <summary>Gets or sets the path to the RTDE output recipe file.</summary>

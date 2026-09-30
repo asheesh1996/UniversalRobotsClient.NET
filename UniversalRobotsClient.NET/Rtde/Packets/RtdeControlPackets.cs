@@ -100,23 +100,27 @@ namespace UniversalRobotics.Rtde.Packets
         /// <summary>The recipe ID assigned by the robot.</summary>
         public byte RecipeId { get; private set; }
 
+        /// <summary>The negotiated RTDE protocol version (1 or 2). Affects response parsing.</summary>
+        public ushort ProtocolVersion { get; set; } = 1;
+
         /// <summary>Creates a setup-outputs request.</summary>
-        public SetupOutputsPackage(IReadOnlyList<string> recipe, double frequency = 0.0)
+        public SetupOutputsPackage(IReadOnlyList<string> recipe, double frequency = 0.0, ushort protocolVersion = 1)
             : base(RtdePackageType.ControlPackageSetupOutputs)
         {
             Recipe = recipe;
             Frequency = frequency;
+            ProtocolVersion = protocolVersion;
         }
 
         /// <inheritdoc />
         public override bool ParseFrom(BinaryParser parser)
         {
-            // Protocol v2: recipt ID comes before the type list
-            // The packet body is: recipe-id (1 byte, v2 only) then comma-separated type list
+            // Protocol v2 response: recipe_id (1 byte) then comma-separated type list.
+            // Protocol v1 response: comma-separated type list only.
+            if (ProtocolVersion == 2)
+                RecipeId = parser.ReadByte();
+
             var raw = parser.ReadString(parser.RemainingBytes);
-            // Try to split: if there is a leading byte that looks like a recipe ID (< 128) followed by CSV
-            // The actual parsing depends on protocol version; we use a simple heuristic:
-            // Parse the comma-separated type string
             var parts = raw.Split(',');
             var types = new List<string>(parts.Length);
             foreach (var p in parts) types.Add(p.Trim());
