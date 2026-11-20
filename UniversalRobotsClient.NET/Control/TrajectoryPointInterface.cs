@@ -24,6 +24,17 @@ namespace UniversalRobotics.Control
 
         private const int MessageSizeBytes = MessageLength * 4;
 
+        /// <summary>Modern spline velocity and acceleration encoding multiplier.</summary>
+        public const int MultVelocityAcceleration = 100_000_000;
+        private int _velocityAccelerationMultiplier = MultVelocityAcceleration;
+
+        /// <summary>Multiplier matching the robot script; use 1,000,000 for legacy scripts.</summary>
+        public int VelocityAccelerationMultiplier
+        {
+            get => _velocityAccelerationMultiplier;
+            set => _velocityAccelerationMultiplier = value > 0 ? value : throw new ArgumentOutOfRangeException(nameof(value));
+        }
+
         private TaskCompletionSource<TrajectoryResult>? _resultTcs;
 
         /// <summary>Raised when the robot reports the result of a trajectory execution.</summary>
@@ -53,8 +64,13 @@ namespace UniversalRobotics.Control
             bool cartesian,
             CancellationToken ct = default)
         {
-            var buf = BuildTrajectoryMessage(positions, null, null, goalTime, blendRadius, 0f,
-                cartesian ? MotionType.MoveL : MotionType.MoveJ);
+            if (positions == null || positions.Length != 6) throw new ArgumentException("Six positions are required.", nameof(positions));
+            MotionPrimitive primitive = cartesian
+                ? new MoveLPrimitive(new CartesianPose(positions[0], positions[1], positions[2], positions[3], positions[4], positions[5]))
+                : new MoveJPrimitive(new JointAngles(positions));
+            primitive.Duration = TimeSpan.FromSeconds(goalTime);
+            primitive.BlendRadius = blendRadius;
+            var buf = BuildMessageFromPrimitive(primitive);
             return await SendToRobotAsync(buf, ct).ConfigureAwait(false);
         }
 
@@ -80,99 +96,73 @@ namespace UniversalRobotics.Control
 
         // ─── Message construction ─────────────────────────────────────────────────
 
-        private static byte[] BuildMessageFromPrimitive(MotionPrimitive prim)
+        private byte[] BuildMessageFromPrimitive(MotionPrimitive prim)
         {
-            double[] positions = new double[6];
-            double[] via = new double[6];
-            bool hasVia = false;
-
-            switch (prim)
+            if (prim == null) throw new ArgumentNullException(nameof(prim));
+            if (prim.Duration < TimeSpan.Zero || prim.BlendRadius < 0 || prim.Acceleration < 0 || prim.Velocity < 0)
+                throw new ArgumentOutOfRangeException(nameof(prim));
+            var first = new double[6];
+            var second = new double[6];
+            var third = new double[] { prim.Velocity, prim.Acceleration, 0, 0, 0, 0 };
+            MotionTarget? target = prim switch
             {
-                case MoveJPrimitive mj:
-                    positions = ExtractPositions(mj.Target);
-                    break;
-                case MoveLPrimitive ml:
-                    positions = ExtractPositions(ml.Target);
-                    break;
-                case MovePPrimitive mp:
-                    positions = ExtractPositions(mp.Target);
-                    break;
-                case MoveCPrimitive mc:
-                    positions = ExtractPositions(mc.Target);
-                    via = ExtractPositions(mc.ViaPoint);
-                    hasVia = true;
-                    break;
-                case OptimoveJPrimitive oj:
-                    positions = ExtractPositions(oj.Target);
-                    break;
-                case OptimoveLPrimitive ol:
-                    positions = ExtractPositions(ol.Target);
-                    break;
-                case SplinePrimitive sp:
-                    positions = sp.Positions;
-                    break;
+                MoveJPrimitive move => move.Target,
+                MoveLPrimitive move => move.Target,
+                MovePPrimitive move => move.Target,
+                MoveCPrimitive move => move.Target,
+                OptimoveJPrimitive move => move.Target,
+                OptimoveLPrimitive move => move.Target,
+                SplinePrimitive _ => null,
+                _ => throw new ArgumentException("Unsupported motion primitive.", nameof(prim))
+            };
+            if (target != null)
+            {
+                first = ExtractPositions(target);
+                if (target.CartesianTarget?.QNear != null)
+                {
+                    second = target.CartesianTarget.QNear.ToArray();
+                    third[2] = 1;
+                }
             }
-
-            return BuildTrajectoryMessage(
-                positions,
-                hasVia ? via : null,
-                prim is SplinePrimitive spline ? spline.Velocities : null,
-                (float)prim.Duration.TotalSeconds,
-                (float)prim.BlendRadius,
-                (float)prim.Acceleration,
-                prim.Type);
-        }
-
-        private static byte[] BuildTrajectoryMessage(
-            double[] positions,
-            double[]? via,
-            double[]? velocities,
-            float goalTime,
-            float blendRadius,
-            float acceleration,
-            MotionType motionType)
-        {
+            if (prim is MoveCPrimitive circular)
+            {
+                if (circular.ArcMode < 0 || circular.ArcMode > 1) throw new ArgumentOutOfRangeException(nameof(prim));
+                second = ExtractPositions(circular.ViaPoint);
+                third[2] = circular.ArcMode;
+            }
+            if (prim is SplinePrimitive spline)
+            {
+                if (spline.SplineType != TrajectorySplineType.Cubic && spline.SplineType != TrajectorySplineType.Quintic)
+                    throw new ArgumentOutOfRangeException(nameof(prim));
+                first = spline.Positions;
+                second = spline.Velocities;
+                third = spline.SplineType == TrajectorySplineType.Quintic ? spline.Accelerations : new double[6];
+            }
             var buf = new byte[MessageSizeBytes];
             int offset = 0;
-
-            // [0..5] positions (× MULT_JOINTSTATE)
-            for (int i = 0; i < 6; i++)
-                PackageSerializer.WriteInt32(buf, ref offset, (int)(positions[i] * MultJointState));
-
-            // [6..11] via or velocities
-            if (via != null)
-                for (int i = 0; i < 6; i++)
-                    PackageSerializer.WriteInt32(buf, ref offset, (int)(via[i] * MultJointState));
-            else if (velocities != null)
-                for (int i = 0; i < 6; i++)
-                    PackageSerializer.WriteInt32(buf, ref offset, (int)(velocities[i] * MultJointState));
-            else
-                for (int i = 0; i < 6; i++) PackageSerializer.WriteInt32(buf, ref offset, 0);
-
-            // [12] acceleration / or accelerations[0]
-            PackageSerializer.WriteInt32(buf, ref offset, (int)(acceleration * MultJointState));
-            // [13] velocity
-            PackageSerializer.WriteInt32(buf, ref offset, 0);
-            // [14] arc mode / reserved
-            PackageSerializer.WriteInt32(buf, ref offset, 0);
-            // [15..17] reserved
-            PackageSerializer.WriteInt32(buf, ref offset, 0);
-            PackageSerializer.WriteInt32(buf, ref offset, 0);
-            PackageSerializer.WriteInt32(buf, ref offset, 0);
-
-            // [18] duration (μs)
-            PackageSerializer.WriteInt32(buf, ref offset, (int)(goalTime * MultJointState));
-
-            // [19] blend radius (× MULT_JOINTSTATE)
-            PackageSerializer.WriteInt32(buf, ref offset, (int)(blendRadius * MultJointState));
-
-            // [20] motion type
-            PackageSerializer.WriteInt32(buf, ref offset, (int)motionType);
-
+            int derivativeMultiplier = prim is SplinePrimitive ? VelocityAccelerationMultiplier : MultJointState;
+            WriteBlock(buf, ref offset, first, MultJointState);
+            WriteBlock(buf, ref offset, second, derivativeMultiplier);
+            WriteBlock(buf, ref offset, third, derivativeMultiplier);
+            PackageSerializer.WriteInt32(buf, ref offset, Encode(prim.Duration.TotalSeconds, MultTime));
+            PackageSerializer.WriteInt32(buf, ref offset, prim is SplinePrimitive point ? (int)point.SplineType : Encode(prim.BlendRadius, MultJointState));
+            PackageSerializer.WriteInt32(buf, ref offset, (int)prim.Type);
             return buf;
         }
 
-        private static readonly int MultJointState = ReverseInterface.MultJointState;
+        private static void WriteBlock(byte[] buffer, ref int offset, double[] values, int multiplier)
+        {
+            if (values == null || values.Length != 6) throw new ArgumentException("Six values are required.", nameof(values));
+            foreach (var value in values)
+                PackageSerializer.WriteInt32(buffer, ref offset, Encode(value, multiplier));
+        }
+
+        private static int Encode(double value, int multiplier)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value) || Math.Abs(value) > (double)int.MaxValue / multiplier)
+                throw new ArgumentOutOfRangeException(nameof(value));
+            return checked((int)Math.Round(value * multiplier, MidpointRounding.AwayFromZero));
+        }
 
         private static double[] ExtractPositions(MotionTarget target)
         {

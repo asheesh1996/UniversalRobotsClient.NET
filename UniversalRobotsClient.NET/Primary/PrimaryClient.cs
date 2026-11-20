@@ -23,7 +23,8 @@ namespace UniversalRobotics.Primary
         /// <inheritdoc />
         public bool TryParse(byte[] buffer, int length, out PrimaryPackage? package)
         {
-            if (length < 5) { package = null; return false; }
+            package = null;
+            if (buffer == null || length < 5 || length > buffer.Length) return false;
 
             // Header: 4-byte big-endian size + 1-byte type
             var headerParser = new BinaryParser(buffer, 0, 5);
@@ -31,8 +32,8 @@ namespace UniversalRobotics.Primary
             var type = (RobotPackageType)headerParser.ReadSByte();
 
             // Payload starts at byte 5, length is totalSize - 5
-            int payloadLength = Math.Max(0, size - 5);
-            if (payloadLength > length - 5) payloadLength = length - 5;
+            if (size < 5 || size != length) return false;
+            int payloadLength = size - 5;
 
             var payloadParser = new BinaryParser(buffer, 5, payloadLength);
 
@@ -46,36 +47,33 @@ namespace UniversalRobotics.Primary
             return package != null;
         }
 
-        private static RobotStatePackage ParseRobotState(BinaryParser parser)
+        private static RobotStatePackage? ParseRobotState(BinaryParser parser)
         {
             var pkg = new RobotStatePackage();
-            pkg.ParseFrom(parser);
-            return pkg;
+            return pkg.ParseFrom(parser) ? pkg : null;
         }
 
-        private static RobotMessagePackage? ParseRobotMessage(BinaryParser parser)
+        private static PrimaryPackage? ParseRobotMessage(BinaryParser parser)
         {
             if (parser.RemainingBytes < 10) return null;
 
-            long timestamp = parser.ReadInt64();
-            sbyte source = parser.ReadSByte();
-            byte msgType = parser.ReadByte();
+            var bytes = parser.ReadRemaining();
+            byte msgType = bytes[9];
 
-            RobotMessagePackage msg = msgType switch
+            RobotMessagePackage? msg = msgType switch
             {
                 6 => new ErrorCodeMessage(),
                 10 => new RuntimeExceptionMessage(),
                 3 => new VersionMessage(),
                 0 => new PrimaryTextMessage(),
                 5 => new SafetyModeMessage(),
-                _ => new PrimaryTextMessage()
+                18 => new HardwareInfoMessage(),
+                _ => null
             };
 
-            msg.ParseFrom(new BinaryParser(GetRemainingBytes(parser), 0, parser.RemainingBytes));
-            return msg;
+            if (msg == null) return new UnknownPrimaryPackage(RobotPackageType.RobotMessage, bytes);
+            return msg.ParseFrom(new BinaryParser(bytes)) ? msg : null;
         }
-
-        private static byte[] GetRemainingBytes(BinaryParser parser) => parser.ReadRemaining();
     }
 
     /// <summary>
@@ -114,6 +112,12 @@ namespace UniversalRobotics.Primary
 
         /// <summary>Gets the latest joint data, or null if not yet received.</summary>
         public JointDataPackage? LatestJointData => _latestJointData;
+
+        /// <summary>Most recent primary configuration packet, if received.</summary>
+        public ConfigurationDataPackage? LatestConfiguration { get; private set; }
+
+        /// <summary>Hardware information sent by newer controllers on connection.</summary>
+        public HardwareInfoMessage? HardwareInfo { get; private set; }
 
         /// <summary>Raised when a new data package is received from the primary interface.</summary>
         public event EventHandler<PrimaryPackage>? PackageReceived;
@@ -166,6 +170,7 @@ namespace UniversalRobotics.Primary
         public async Task StopAsync()
         {
             _cts?.Cancel();
+            _stream?.Disconnect();
             if (_readerTask != null)
                 try { await _readerTask.ConfigureAwait(false); } catch { }
             _stream?.Disconnect();
@@ -257,7 +262,12 @@ namespace UniversalRobotics.Primary
                             if (sub is RobotModeDataPackage mode) _latestRobotMode = mode;
                             else if (sub is JointDataPackage joint) _latestJointData = joint;
                             else if (sub is MasterboardDataPackage mb) _latestMasterboard = mb;
+                            else if (sub is ConfigurationDataPackage configuration) LatestConfiguration = configuration;
                         }
+                    }
+                    else if (pkg is HardwareInfoMessage hardware)
+                    {
+                        HardwareInfo = hardware;
                     }
                     else if (pkg is VersionMessage ver)
                     {

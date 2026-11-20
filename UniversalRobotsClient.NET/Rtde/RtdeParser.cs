@@ -11,7 +11,7 @@ namespace UniversalRobotics.Rtde.Packets
     public sealed class RtdeParser : IParser<RtdePackageHeader, RtdePackage>
     {
         private readonly System.Collections.Generic.IReadOnlyList<string> _outputRecipe;
-        private DataPackage? _preallocatedDataPackage;
+        private System.Collections.Generic.IReadOnlyList<string>? _fieldTypes;
         private ushort _protocolVersion = 1;
 
         /// <summary>
@@ -27,24 +27,22 @@ namespace UniversalRobotics.Rtde.Packets
         internal void SetProtocolVersion(ushort version)
         {
             _protocolVersion = version;
-            // Re-create the preallocated package so it picks up the new protocol version.
-            if (_preallocatedDataPackage != null)
-                _preallocatedDataPackage.ProtocolVersion = version;
         }
 
         /// <summary>Updates the field type metadata after the setup handshake is complete.</summary>
         internal void SetFieldTypes(System.Collections.Generic.IReadOnlyList<string> fieldTypes)
         {
-            _preallocatedDataPackage ??= new DataPackage(_outputRecipe, protocolVersion: _protocolVersion);
-            _preallocatedDataPackage.SetFieldTypes(fieldTypes);
+            _fieldTypes = fieldTypes;
         }
 
         /// <inheritdoc />
         public bool TryParse(byte[] buffer, int length, out RtdePackage? package)
         {
-            if (length < 3) { package = null; return false; }
+            package = null;
+            if (buffer == null || length < 3 || length > buffer.Length) return false;
 
             var header = RtdePackageHeader.FromBytes(buffer);
+            if (header.Size != length) return false;
             // Parser receives the full packet; skip the 3-byte header to get the payload
             var parser = new BinaryParser(buffer, 3, length - 3);
 
@@ -71,7 +69,7 @@ namespace UniversalRobotics.Rtde.Packets
 
         private DataPackage? ParseDataPackage(BinaryParser parser)
         {
-            var pkg = _preallocatedDataPackage ?? new DataPackage(_outputRecipe);
+            var pkg = new DataPackage(_outputRecipe, _fieldTypes, _protocolVersion);
             return pkg.ParseFrom(parser) ? pkg : null;
         }
     }

@@ -120,7 +120,7 @@ namespace UniversalRobotics
 
             // Wait briefly for the version message
             await Task.Delay(500, cancellationToken).ConfigureAwait(false);
-            _softwareVersion = _primaryClient.SoftwareVersion;
+            _softwareVersion = _config.RobotSoftwareVersion ?? _primaryClient.SoftwareVersion;
             _logger.LogInformation("Robot software version: {Version}.", _softwareVersion?.ToString() ?? "unknown");
 
             // 2. RTDE client — real-time data
@@ -151,6 +151,7 @@ namespace UniversalRobotics
 
             _reverseInterface = new ReverseInterface(reverseConfig, MakeLogger<ReverseInterface>());
             await _reverseInterface.StartAsync(cancellationToken).ConfigureAwait(false);
+            _reverseInterface.ProgramStateChanged += OnProgramStateChanged;
 
             var trajectoryConfig = new ReverseInterfaceConfig { Port = _config.TrajectoryPort };
             _trajectoryInterface = new TrajectoryPointInterface(trajectoryConfig, MakeLogger<TrajectoryPointInterface>());
@@ -165,12 +166,14 @@ namespace UniversalRobotics
 
             // 4. Script sender
             _scriptSender = new ScriptSender(_config.ScriptSenderPort, MakeLogger<ScriptSender>());
-            _scriptReader = new ScriptReader();
+            _scriptReader = new ScriptReader { StrictVariables = true };
 
             if (_config.ScriptFile != null && File.Exists(_config.ScriptFile))
             {
                 var variables = BuildScriptVariables();
                 var scriptContent = _scriptReader.ReadScript(_config.ScriptFile, variables);
+                _trajectoryInterface.VelocityAccelerationMultiplier = _scriptReader.IsVariableRegistered("VEL_ACC_REPLACE")
+                    ? TrajectoryPointInterface.MultVelocityAcceleration : ReverseInterface.MultJointState;
                 _scriptSender.SetScript(scriptContent);
             }
 
@@ -213,7 +216,11 @@ namespace UniversalRobotics
                 _scriptCommandInterface.Dispose();
             }
 
-            _reverseInterface?.Dispose();
+            if (_reverseInterface != null)
+            {
+                _reverseInterface.ProgramStateChanged -= OnProgramStateChanged;
+                _reverseInterface.Dispose();
+            }
             _scriptSender?.Dispose();
             _dashboardG5?.Dispose();
             _dashboardX?.Dispose();
@@ -248,7 +255,11 @@ namespace UniversalRobotics
 
             var variables = BuildScriptVariables();
             var scriptContent = _scriptReader!.ReadScript(_config.ScriptFile, variables);
-            return await _primaryClient.SendScriptAsync(scriptContent, cancellationToken).ConfigureAwait(false);
+            if (_trajectoryInterface != null)
+                _trajectoryInterface.VelocityAccelerationMultiplier = _scriptReader.IsVariableRegistered("VEL_ACC_REPLACE")
+                    ? TrajectoryPointInterface.MultVelocityAcceleration : ReverseInterface.MultJointState;
+            var program = "def externalControl():\n  " + scriptContent.TrimEnd().Replace("\n", "\n  ") + "\nend\n";
+            return await _primaryClient.SendScriptAsync(program, cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>Sends arbitrary URScript code to the robot.</summary>
@@ -318,6 +329,9 @@ namespace UniversalRobotics
         private void OnTrajectoryResult(object? sender, TrajectoryResult result)
             => TrajectoryDone?.Invoke(this, result);
 
+        private void OnProgramStateChanged(object? sender, bool running)
+            => ProgramStateChanged?.Invoke(this, running);
+
         private void OnTrajectoryProgramStateChanged(object? sender, bool running)
             => TrajectoryInterfaceDisconnected?.Invoke(this, running);
 
@@ -330,6 +344,16 @@ namespace UniversalRobotics
         {
             return new Dictionary<string, object>(StringComparer.Ordinal)
             {
+                ["BEGIN_REPLACE"] = "",
+                ["JOINT_STATE_REPLACE"] = ReverseInterface.MultJointState,
+                ["TIME_REPLACE"] = ReverseInterface.MultTime,
+                ["VEL_ACC_REPLACE"] = TrajectoryPointInterface.MultVelocityAcceleration,
+                ["SERVO_J_REPLACE"] = "lookahead_time=0.03, gain=300",
+                ["SERVER_IP_REPLACE"] = string.IsNullOrWhiteSpace(_config.ReverseIp) ? _rtdeClient?.LocalIpAddress ?? throw new InvalidOperationException("No local RTDE address.") : _config.ReverseIp,
+                ["SERVER_PORT_REPLACE"] = _config.ReversePort,
+                ["TRAJECTORY_SERVER_PORT_REPLACE"] = _config.TrajectoryPort,
+                ["SCRIPT_COMMAND_SERVER_PORT_REPLACE"] = _config.ScriptCommandPort,
+                ["ROBOT_SOFTWARE_VERSION"] = _softwareVersion ?? throw new InvalidOperationException("Robot software version is required to render control scripts."),
                 ["REVERSE_IP"] = "0.0.0.0",
                 ["REVERSE_PORT"] = _config.ReversePort,
                 ["SCRIPT_COMMAND_PORT"] = _config.ScriptCommandPort,

@@ -134,6 +134,7 @@ namespace UniversalRobotics.Rtde.Packets
             // Payload: optional 8-byte frequency (protocol v2), then comma-separated field names
             var recipeStr = string.Join(",", Recipe);
             var recipeBytes = Encoding.ASCII.GetBytes(recipeStr);
+            if (ProtocolVersion == 1) return recipeBytes;
             var freqBytes = new byte[8];
             int offset = 0;
             PackageSerializer.WriteDouble(freqBytes, ref offset, Frequency);
@@ -252,8 +253,8 @@ namespace UniversalRobotics.Rtde.Packets
         public override bool ParseFrom(BinaryParser parser)
         {
             byte msgLen = parser.ReadByte();
-            byte srcLen = parser.ReadByte();
             Message = msgLen > 0 ? parser.ReadString(msgLen) : string.Empty;
+            byte srcLen = parser.ReadByte();
             Source = srcLen > 0 ? parser.ReadString(srcLen) : string.Empty;
             return true;
         }

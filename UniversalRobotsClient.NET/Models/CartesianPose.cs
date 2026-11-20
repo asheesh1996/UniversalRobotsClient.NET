@@ -96,6 +96,9 @@ namespace UniversalRobotics.Models
         /// <summary>Returns <see langword="true"/> if this target is a Cartesian pose.</summary>
         public bool IsCartesian => CartesianTarget is not null;
 
+        /// <inheritdoc />
+        public override string ToString() => JointTarget?.ToString() ?? CartesianTarget?.ToString() ?? string.Empty;
+
         /// <summary>Creates a joint-space motion target.</summary>
         public MotionTarget(JointAngles jointTarget) => JointTarget = jointTarget;
 

@@ -14,6 +14,9 @@ namespace UniversalRobotics
         /// <summary>Gets or sets the robot's IP address.</summary>
         public string RobotIp { get; set; } = string.Empty;
 
+        /// <summary>Control-PC address reachable from the robot. Empty selects the RTDE connection's local address.</summary>
+        public string ReverseIp { get; set; } = string.Empty;
+
         /// <summary>Gets or sets the path to the URScript file (used with the script sender).</summary>
         public string? ScriptFile { get; set; }
 

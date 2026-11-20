@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -29,6 +30,10 @@ namespace UniversalRobotics.Rtde
         private readonly SemaphoreSlim _writeSignal = new SemaphoreSlim(0, 1);
         private CancellationTokenSource? _cts;
         private Task? _writerTask;
+        private readonly object _inputLock = new object();
+        private IReadOnlyList<string>? _fieldTypes;
+
+        internal void SetFieldTypes(IReadOnlyList<string> types) => _fieldTypes = types;
 
         /// <summary>
         /// Creates a new writer for the given RTDE stream and input recipe.
@@ -54,7 +59,7 @@ namespace UniversalRobotics.Rtde
         {
             _recipeId = recipeId;
             if (_recipe.Count > 0)
-                _inputPackage = new DataPackage(_recipe);
+                _inputPackage = new DataPackage(_recipe, _fieldTypes) { RecipeId = recipeId };
 
             _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _writerTask = Task.Run(() => WriterLoopAsync(_cts.Token), _cts.Token);
@@ -65,7 +70,6 @@ namespace UniversalRobotics.Rtde
         public async Task StopAsync()
         {
             _cts?.Cancel();
-            _writeSignal.Release(); // unblock waiting task
             if (_writerTask != null)
                 try { await _writerTask.ConfigureAwait(false); } catch { }
         }
@@ -74,8 +78,17 @@ namespace UniversalRobotics.Rtde
 
         /// <summary>Queues a speed-slider fraction [0, 1] for transmission.</summary>
         public bool SendSpeedSlider(double fraction)
-            => SendInputDouble("speed_slider_fraction", fraction)
-               && SendInputUInt32("speed_slider_mask", 1);
+        {
+            if (double.IsNaN(fraction) || fraction < 0 || fraction > 1) throw new ArgumentOutOfRangeException(nameof(fraction));
+            lock (_inputLock)
+            {
+                if (_inputPackage == null || !_recipe.Contains("speed_slider_fraction") || !_recipe.Contains("speed_slider_mask")) return false;
+                _inputPackage.SetData("speed_slider_fraction", fraction);
+                _inputPackage.SetData("speed_slider_mask", 1u);
+                SignalWrite();
+                return true;
+            }
+        }
 
         /// <summary>Queues a standard digital output mask and value.</summary>
         public bool SendStandardDigitalOutput(byte outputMask, byte outputValues)
@@ -107,47 +120,33 @@ namespace UniversalRobotics.Rtde
 
         /// <summary>Sets a boolean input field.</summary>
         public bool SendInputBool(string fieldName, bool value)
-        {
-            if (_inputPackage == null) return false;
-            var result = _inputPackage.SetData(fieldName, value);
-            if (result) SignalWrite();
-            return result;
-        }
+            => SetField(fieldName, value);
 
         /// <summary>Sets a uint8 input field.</summary>
         public bool SendInputUInt8(string fieldName, byte value)
-        {
-            if (_inputPackage == null) return false;
-            var result = _inputPackage.SetData(fieldName, value);
-            if (result) SignalWrite();
-            return result;
-        }
+            => SetField(fieldName, value);
 
         /// <summary>Sets a uint32 input field.</summary>
         public bool SendInputUInt32(string fieldName, uint value)
-        {
-            if (_inputPackage == null) return false;
-            var result = _inputPackage.SetData(fieldName, value);
-            if (result) SignalWrite();
-            return result;
-        }
+            => SetField(fieldName, value);
 
         /// <summary>Sets a double input field.</summary>
         public bool SendInputDouble(string fieldName, double value)
-        {
-            if (_inputPackage == null) return false;
-            var result = _inputPackage.SetData(fieldName, value);
-            if (result) SignalWrite();
-            return result;
-        }
+            => SetField(fieldName, value);
 
         /// <summary>Sets a vector6d input field.</summary>
         public bool SendInputVector6d(string fieldName, double[] values)
+            => SetField(fieldName, values);
+
+        private bool SetField<T>(string fieldName, T value)
         {
-            if (_inputPackage == null) return false;
-            var result = _inputPackage.SetData(fieldName, values);
-            if (result) SignalWrite();
-            return result;
+            lock (_inputLock)
+            {
+                if (_inputPackage == null) return false;
+                var result = _inputPackage.SetData(fieldName, value);
+                if (result) SignalWrite();
+                return result;
+            }
         }
 
         /// <summary>Immediately sends the provided data package to the robot.</summary>
@@ -168,7 +167,9 @@ namespace UniversalRobotics.Rtde
 
         private void SignalWrite()
         {
-            Interlocked.Exchange(ref _pendingPackage, _inputPackage);
+            var snapshot = new DataPackage(_recipe);
+            snapshot.CopyFrom(_inputPackage!);
+            Interlocked.Exchange(ref _pendingPackage, snapshot);
             if (_writeSignal.CurrentCount == 0)
                 _writeSignal.Release();
         }

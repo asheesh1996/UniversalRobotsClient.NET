@@ -1,5 +1,7 @@
 // Licensed under the Apache License, Version 2.0
 
+#nullable enable
+
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -50,17 +52,29 @@ namespace UniversalRobotics.Rtde
     [Flags]
     public enum RtdeSafetyStatusBits
     {
+        /// <summary>Normal safety mode.</summary>
         IsNormalMode = 1 << 0,
+        /// <summary>Reduced safety mode.</summary>
         IsReducedMode = 1 << 1,
+        /// <summary>Protective stop is active.</summary>
         IsProtectiveStopped = 1 << 2,
+        /// <summary>Recovery mode is active.</summary>
         IsRecoveryMode = 1 << 3,
+        /// <summary>Safeguard stop is active.</summary>
         IsSafeguardStopped = 1 << 4,
+        /// <summary>System emergency stop is active.</summary>
         IsSystemEmergencyStopped = 1 << 5,
+        /// <summary>Robot emergency stop is active.</summary>
         IsRobotEmergencyStopped = 1 << 6,
+        /// <summary>An emergency stop is active.</summary>
         IsEmergencyStopped = 1 << 7,
+        /// <summary>A safety violation is reported.</summary>
         IsViolation = 1 << 8,
+        /// <summary>A safety fault is reported.</summary>
         IsFault = 1 << 9,
+        /// <summary>The robot is stopped by a safety condition.</summary>
         IsStoppedDueToSafety = 1 << 10,
+        /// <summary>The three-position enabling input is active.</summary>
         Is3PeInputActive = 1 << 11
     }
 
@@ -101,6 +115,9 @@ namespace UniversalRobotics.Rtde
 
         /// <summary>Gets the current lifecycle state of the RTDE client.</summary>
         public ClientState State => _clientState;
+
+        /// <summary>Local interface address used to reach the robot.</summary>
+        public string? LocalIpAddress => _stream.LocalIpAddress;
 
         /// <summary>Raised when the connection to the robot is lost.</summary>
         public event EventHandler? ConnectionLost;
@@ -206,6 +223,7 @@ namespace UniversalRobotics.Rtde
         /// can be fetched with <see cref="GetDataPackageAsync"/>. When <see langword="false"/>, the
         /// caller must poll <see cref="GetDataPackageBlockingAsync"/>.
         /// </param>
+        /// <param name="cancellationToken">Cancels startup and, in background mode, the reader.</param>
         public async Task StartAsync(bool readInBackground = true, CancellationToken cancellationToken = default)
         {
             var startPkg = new ControlStartPackage();
@@ -237,9 +255,18 @@ namespace UniversalRobotics.Rtde
         public async Task DisconnectAsync()
         {
             _backgroundReaderCts?.Cancel();
+            _stream.Disconnect();
+            if (_writer != null) await _writer.StopAsync().ConfigureAwait(false);
             if (_backgroundReaderTask != null)
                 try { await _backgroundReaderTask.ConfigureAwait(false); } catch { }
-            _stream.Disconnect();
+            _backgroundReaderTask = null;
+            _backgroundReaderCts?.Dispose();
+            _backgroundReaderCts = null;
+            lock (_packageLock)
+            {
+                _latestPackage = null;
+                while (_newDataSignal.Wait(0)) { }
+            }
             _clientState = ClientState.Uninitialized;
         }
 
@@ -257,9 +284,14 @@ namespace UniversalRobotics.Rtde
             {
                 await _newDataSignal.WaitAsync(linked.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return null; }
 
-            lock (_packageLock) return _latestPackage;
+            lock (_packageLock)
+            {
+                var package = _latestPackage;
+                _latestPackage = null;
+                return package;
+            }
         }
 
         /// <summary>
@@ -267,21 +299,11 @@ namespace UniversalRobotics.Rtde
         /// </summary>
         public async Task<bool> GetDataPackageBlockingAsync(DataPackage targetPackage, CancellationToken cancellationToken = default)
         {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                var (buffer, length) = await _stream.ReadPacketAsync(cancellationToken).ConfigureAwait(false);
-                if (_parser.TryParse(buffer, length, out var pkg) && pkg is DataPackage dp)
-                {
-                    // Copy data into targetPackage
-                    foreach (var field in _outputRecipe)
-                    {
-                        if (dp.GetData<object>(field, out var val))
-                            targetPackage.SetData(field, val);
-                    }
-                    return true;
-                }
-            }
-            return false;
+            if (targetPackage == null) throw new ArgumentNullException(nameof(targetPackage));
+            var package = await GetNextDataPackageAsync(cancellationToken).ConfigureAwait(false);
+            if (package == null) return false;
+            targetPackage.CopyFrom(package);
+            return true;
         }
 
         /// <summary>
@@ -292,6 +314,9 @@ namespace UniversalRobotics.Rtde
         /// </summary>
         public async Task<DataPackage?> GetNextDataPackageAsync(CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_backgroundReaderTask != null && !_backgroundReaderTask.IsCompleted)
+                throw new InvalidOperationException("Direct reads cannot run alongside the background reader.");
             while (!cancellationToken.IsCancellationRequested)
             {
                 var (buffer, length) = await _stream.ReadPacketAsync(cancellationToken).ConfigureAwait(false);
@@ -320,9 +345,8 @@ namespace UniversalRobotics.Rtde
         }
 
         /// <summary>
-        /// Primes the RTDE stream by performing a start → read-at-least-one-packet → pause cycle.
-        /// Mirrors C++ RTDEClient::isRobotBooted(): without this cycle URSim accepts ControlStart
-        /// but never emits data packets on the subsequent real <see cref="StartAsync"/> call.
+        /// Checks that streaming works before initialization succeeds, then pauses the stream.
+        /// Mirrors the upstream boot check; this is a readiness check, not a protocol priming requirement.
         /// </summary>
         private async Task EnsureRtdeBootedAsync(CancellationToken ct)
         {
@@ -331,8 +355,7 @@ namespace UniversalRobotics.Rtde
             await SendAndReceiveAsync(startPkg, ct).ConfigureAwait(false);
             if (!startPkg.Accepted)
             {
-                _logger.LogWarning("ControlStart not accepted during boot-check; skipping.");
-                return;
+                throw new CommunicationException("ControlStart was rejected during the boot check.");
             }
 
             // 2. Read packets for up to 3 s. C++ exits when timestamp >= 40 s (robot fully up)
@@ -355,8 +378,11 @@ namespace UniversalRobotics.Rtde
                         if (timestamp >= 40.0) break;  // robot has been running ≥ 40 s
                     }
                 }
-                catch (OperationCanceledException) { break; }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { break; }
             }
+
+            ct.ThrowIfCancellationRequested();
+            if (packetsRead == 0) throw new CommunicationException("No RTDE data received during the boot check.");
 
             _logger.LogDebug("RTDE boot-check: {N} packet(s), timestamp={Ts:F1} s.",
                 packetsRead, timestamp);
@@ -384,18 +410,20 @@ namespace UniversalRobotics.Rtde
                 {
                     (buffer, length) = await _stream.ReadPacketAsync(linked.Token).ConfigureAwait(false);
                 }
-                catch (OperationCanceledException) { break; }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { break; }
 
                 if (_parser.TryParse(buffer, length, out var resp) &&
                     resp?.PackageType == RtdePackageType.ControlPackagePause)
                 {
                     pausePkg.ParseFrom(new BinaryParser(buffer, 3, length - 3));
+                    if (!pausePkg.Accepted) throw new CommunicationException("RTDE pause was rejected.");
                     _logger.LogDebug("RTDE paused (accepted={Accepted}).", pausePkg.Accepted);
                     return;
                 }
             }
 
-            _logger.LogWarning("Did not receive ControlPause response within 5 s.");
+            ct.ThrowIfCancellationRequested();
+            throw new CommunicationException("Did not receive ControlPause response within 5 s.");
         }
 
         private async Task NegotiateProtocolVersionAsync(CancellationToken ct)
@@ -420,18 +448,30 @@ namespace UniversalRobotics.Rtde
             // frequency was requested. Sending 0.0 Hz to URSim causes it to accept the
             // recipe but silently refuse to stream data after ControlStart.
             double frequency = _targetFrequency > 0.0 ? _targetFrequency : _maxFrequency;
+            if (double.IsNaN(_targetFrequency) || double.IsInfinity(_targetFrequency) || _targetFrequency < 0 || frequency > _maxFrequency)
+                throw new ArgumentOutOfRangeException(nameof(_targetFrequency));
             var pkg = new SetupOutputsPackage(_outputRecipe, frequency, _protocolVersion);
             await SendAndReceiveAsync(pkg, ct).ConfigureAwait(false);
 
+            if (pkg.VariableTypes.Count != _outputRecipe.Count)
+                throw new CommunicationException("RTDE output type count does not match the recipe.");
+            var unavailable = new List<string>();
             for (int i = 0; i < pkg.VariableTypes.Count; i++)
             {
                 if (pkg.VariableTypes[i] == "NOT_FOUND")
                 {
-                    if (_ignoreUnavailableOutputs)
-                        _logger.LogWarning("RTDE output field '{Field}' is not available on this robot.", _outputRecipe[i]);
-                    else
-                        throw new UrException($"RTDE output field '{_outputRecipe[i]}' is not available on this robot.");
+                    unavailable.Add(_outputRecipe[i]);
                 }
+                else if (RtdeTypeMap.Resolve(pkg.VariableTypes[i]) == RtdeValueKind.None)
+                    throw new CommunicationException($"Unsupported RTDE field type: {pkg.VariableTypes[i]}.");
+            }
+            if (unavailable.Count > 0)
+            {
+                if (!_ignoreUnavailableOutputs) throw new RtdeInvalidKeyException(unavailable);
+                _outputRecipe.RemoveAll(unavailable.Contains);
+                if (_outputRecipe.Count == 0) throw new CommunicationException("No supported RTDE output fields remain.");
+                await SetupOutputRecipeAsync(ct).ConfigureAwait(false);
+                return;
             }
 
             _dataPackage = new DataPackage(_outputRecipe, pkg.VariableTypes, _protocolVersion);
@@ -444,7 +484,10 @@ namespace UniversalRobotics.Rtde
             await SendAndReceiveAsync(pkg, ct).ConfigureAwait(false);
 
             var inputPkg = new DataPackage(_inputRecipe, pkg.VariableTypes, _protocolVersion);
+            if (pkg.VariableTypes.Count != _inputRecipe.Count || pkg.VariableTypes.Any(type => RtdeTypeMap.Resolve(type) == RtdeValueKind.None))
+                throw new CommunicationException("RTDE input recipe contains unavailable, unsupported or already reserved fields: " + string.Join(", ", _inputRecipe));
             _writer = new RtdeWriter(_stream, _inputRecipe, _logger);
+            _writer.SetFieldTypes(pkg.VariableTypes);
             await _writer.StartAsync(pkg.RecipeId, ct).ConfigureAwait(false);
         }
 
@@ -483,8 +526,11 @@ namespace UniversalRobotics.Rtde
                     var (buffer, length) = await _stream.ReadPacketAsync(ct).ConfigureAwait(false);
                     if (_parser.TryParse(buffer, length, out var pkg) && pkg is DataPackage dp)
                     {
-                        lock (_packageLock) _latestPackage = dp;
-                        if (_newDataSignal.CurrentCount == 0) _newDataSignal.Release();
+                        lock (_packageLock)
+                        {
+                            _latestPackage = dp;
+                            if (_newDataSignal.CurrentCount == 0) _newDataSignal.Release();
+                        }
                     }
                 }
                 catch (OperationCanceledException) { break; }

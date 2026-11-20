@@ -40,6 +40,9 @@ namespace UniversalRobotics.Rtde.Packets
         private RtdeValue[] _data;
         private ushort _protocolVersion;
 
+        /// <summary>Recipe identifier assigned during RTDE setup.</summary>
+        public byte RecipeId { get; set; }
+
         /// <summary>Gets the RTDE protocol version used when serializing this package.</summary>
         public ushort ProtocolVersion
         {
@@ -73,6 +76,20 @@ namespace UniversalRobotics.Rtde.Packets
                     ? RtdeTypeMap.Resolve(fieldTypes[i])
                     : RtdeValueKind.None;
                 _fieldMeta[recipe[i]] = (i, kind);
+                _data[i] = kind switch
+                {
+                    RtdeValueKind.Bool => RtdeValue.FromBool(false),
+                    RtdeValueKind.UInt8 => RtdeValue.FromUInt8(0),
+                    RtdeValueKind.UInt32 => RtdeValue.FromUInt32(0),
+                    RtdeValueKind.UInt64 => RtdeValue.FromUInt64(0),
+                    RtdeValueKind.Int32 => RtdeValue.FromInt32(0),
+                    RtdeValueKind.Double => RtdeValue.FromDouble(0),
+                    RtdeValueKind.Vector3d => RtdeValue.FromVector3d(new double[3]),
+                    RtdeValueKind.Vector6d => RtdeValue.FromVector6d(new double[6]),
+                    RtdeValueKind.Vector6Int32 => RtdeValue.FromVector6Int32(new int[6]),
+                    RtdeValueKind.Vector6UInt32 => RtdeValue.FromVector6UInt32(new uint[6]),
+                    _ => null!
+                };
             }
         }
 
@@ -121,7 +138,7 @@ namespace UniversalRobotics.Rtde.Packets
         {
             // Protocol v2: every data packet starts with a 1-byte recipe_id before the field data.
             if (_protocolVersion == 2)
-                parser.ReadByte(); // consume recipe_id
+                RecipeId = parser.ReadByte();
 
             for (int i = 0; i < _recipe.Count; i++)
             {
@@ -139,8 +156,9 @@ namespace UniversalRobotics.Rtde.Packets
         protected override byte[] SerializePayload()
         {
             // Estimate size: each field has a max size; allocate a generous buffer
-            var buf = new byte[512];
+            var buf = new byte[1 + _recipe.Count * 48];
             int offset = 0;
+            PackageSerializer.WriteByte(buf, ref offset, RecipeId);
             for (int i = 0; i < _recipe.Count; i++)
             {
                 var val = _data[i];
@@ -255,6 +273,17 @@ namespace UniversalRobotics.Rtde.Packets
             }
             result = default!;
             return false;
+        }
+
+        internal void CopyFrom(DataPackage source)
+        {
+            if (_recipe.Count != source._recipe.Count) throw new ArgumentException(nameof(source));
+            for (int index = 0; index < _recipe.Count; index++)
+                if (_recipe[index] != source._recipe[index]) throw new ArgumentException(nameof(source));
+            _protocolVersion = source._protocolVersion;
+            RecipeId = source.RecipeId;
+            foreach (var entry in source._fieldMeta) _fieldMeta[entry.Key] = entry.Value;
+            _data = (RtdeValue[])source._data.Clone();
         }
 
         private static RtdeValue CreateRtdeValue<T>(RtdeValueKind kind, T value)

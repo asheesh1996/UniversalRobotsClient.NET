@@ -9,6 +9,188 @@ namespace UniversalRobotics.Tests
 {
     public class BinaryParserTests
     {
+        [Fact]
+        public void Constructor_NullBuffer_ThrowsArgumentNullException()
+        {
+            Assert.Equal("buffer", Assert.Throws<ArgumentNullException>(() => new BinaryParser(null!)).ParamName);
+            Assert.Equal("buffer", Assert.Throws<ArgumentNullException>(() => new BinaryParser(null!, 0, 0)).ParamName);
+        }
+
+        [Theory]
+        [InlineData(int.MinValue, 0, "offset")]
+        [InlineData(int.MaxValue, 0, "offset")]
+        [InlineData(4, 1, "length")]
+        [InlineData(1, int.MaxValue, "length")]
+        [InlineData(0, int.MinValue, "length")]
+        public void Constructor_InvalidSlice_ReportsParameter(int offset, int length, string parameter)
+        {
+            var exception = Assert.Throws<ArgumentOutOfRangeException>(() => new BinaryParser(new byte[4], offset, length));
+
+            Assert.Equal(parameter, exception.ParamName);
+        }
+
+        [Theory]
+        [InlineData(0)]
+        [InlineData(2)]
+        [InlineData(4)]
+        public void Constructor_EmptySlice_IsExhausted(int offset)
+        {
+            var parser = new BinaryParser(new byte[] { 10, 20, 30, 40 }, offset, 0);
+
+            Assert.Equal(0, parser.RemainingBytes);
+            Assert.True(parser.IsEmpty);
+            Assert.Empty(parser.ReadRemaining());
+            Assert.Throws<InvalidOperationException>(() => parser.ReadByte());
+            Assert.Equal(0, parser.RemainingBytes);
+        }
+
+        [Theory]
+        [InlineData(-1, typeof(ArgumentOutOfRangeException))]
+        [InlineData(int.MinValue, typeof(ArgumentOutOfRangeException))]
+        [InlineData(4, typeof(InvalidOperationException))]
+        [InlineData(int.MaxValue, typeof(InvalidOperationException))]
+        public void ReadString_InvalidLength_PreservesCursor(int length, Type exceptionType)
+        {
+            var parser = new BinaryParser(new byte[] { 99, 1, 65, 66, 67, 88 }, 1, 4);
+            Assert.Equal(1, parser.ReadByte());
+
+            var exception = Assert.Throws(exceptionType, () => parser.ReadString(length));
+
+            if (exception is ArgumentOutOfRangeException argumentException)
+                Assert.Equal("count", argumentException.ParamName);
+            Assert.Equal(3, parser.RemainingBytes);
+            Assert.False(parser.IsEmpty);
+            Assert.Equal("ABC", parser.ReadString(3));
+            Assert.True(parser.IsEmpty);
+        }
+
+        [Fact]
+        public void ReadString_ZeroAndExactLength_RespectSlice()
+        {
+            var parser = new BinaryParser(new byte[] { 88, 65, 66, 67, 89 }, 1, 3);
+
+            Assert.Equal(string.Empty, parser.ReadString(0));
+            Assert.Equal(3, parser.RemainingBytes);
+            Assert.Equal("ABC", parser.ReadString(3));
+            Assert.Equal(0, parser.RemainingBytes);
+            Assert.True(parser.IsEmpty);
+            Assert.Equal(string.Empty, parser.ReadString(0));
+            Assert.Throws<InvalidOperationException>(() => parser.ReadByte());
+        }
+
+        [Fact]
+        public void ReadInt32_TruncatedSlice_PreservesCursor()
+        {
+            var parser = new BinaryParser(new byte[] { 99, 1, 2, 3, 4, 5 }, 1, 3);
+
+            Assert.Throws<InvalidOperationException>(() => parser.ReadInt32());
+
+            Assert.Equal(3, parser.RemainingBytes);
+            Assert.False(parser.IsEmpty);
+            Assert.Equal(new byte[] { 1, 2, 3 }, parser.ReadRemaining());
+            Assert.True(parser.IsEmpty);
+        }
+
+        [Theory]
+        [InlineData(-1, typeof(ArgumentOutOfRangeException))]
+        [InlineData(int.MinValue, typeof(ArgumentOutOfRangeException))]
+        [InlineData(4, typeof(InvalidOperationException))]
+        [InlineData(int.MaxValue, typeof(InvalidOperationException))]
+        public void CreateSubParser_InvalidLength_PreservesCursor(int length, Type exceptionType)
+        {
+            var parser = new BinaryParser(new byte[] { 99, 1, 2, 3, 4, 88 }, 1, 4);
+            Assert.Equal(1, parser.ReadByte());
+
+            var exception = Assert.Throws(exceptionType, () => parser.CreateSubParser(length));
+
+            if (exception is ArgumentOutOfRangeException argumentException)
+                Assert.Equal("length", argumentException.ParamName);
+            Assert.Equal(3, parser.RemainingBytes);
+            Assert.False(parser.IsEmpty);
+            Assert.Equal(new byte[] { 2, 3, 4 }, parser.ReadRemaining());
+        }
+
+        [Fact]
+        public void CreateSubParser_ZeroLength_DoesNotAdvanceParent()
+        {
+            var parser = new BinaryParser(new byte[] { 99, 42, 88 }, 1, 1);
+
+            var sub = parser.CreateSubParser(0);
+
+            Assert.Equal(0, sub.RemainingBytes);
+            Assert.True(sub.IsEmpty);
+            Assert.Throws<InvalidOperationException>(() => sub.ReadByte());
+            Assert.Equal(1, parser.RemainingBytes);
+            Assert.Equal(42, parser.ReadByte());
+            Assert.True(parser.IsEmpty);
+        }
+
+        [Fact]
+        public void CreateSubParser_ExactLength_AdvancesParentAndBoundsChild()
+        {
+            var parser = new BinaryParser(new byte[] { 99, 1, 2, 3, 88 }, 1, 3);
+            Assert.Equal(1, parser.ReadByte());
+
+            var sub = parser.CreateSubParser(2);
+
+            Assert.Equal(0, parser.RemainingBytes);
+            Assert.True(parser.IsEmpty);
+            Assert.Equal(2, sub.RemainingBytes);
+            Assert.Equal(2, sub.ReadByte());
+            Assert.Throws<InvalidOperationException>(() => sub.ReadUInt16());
+            Assert.Equal(1, sub.RemainingBytes);
+            Assert.Equal(3, sub.ReadByte());
+            Assert.True(sub.IsEmpty);
+            Assert.Throws<InvalidOperationException>(() => sub.ReadByte());
+            Assert.Empty(parser.ReadRemaining());
+        }
+
+        [Theory]
+        [InlineData(new byte[] { 88, 65, 66, 0, 89 }, 2, "AB", 0)]
+        [InlineData(new byte[] { 88, 65, 0, 66, 89 }, 3, "A", 1)]
+        public void ReadNullTerminatedString_RespectsSlice(byte[] buffer, int length, string expected, int remaining)
+        {
+            var parser = new BinaryParser(buffer, 1, length);
+
+            Assert.Equal(expected, parser.ReadNullTerminatedString());
+            Assert.Equal(remaining, parser.RemainingBytes);
+            Assert.Equal(remaining == 0, parser.IsEmpty);
+            Assert.Equal(remaining == 0 ? Array.Empty<byte>() : new byte[] { 66 }, parser.ReadRemaining());
+            Assert.True(parser.IsEmpty);
+        }
+
+        [Theory]
+        [InlineData(-1, 0)]
+        [InlineData(5, 0)]
+        [InlineData(0, -1)]
+        [InlineData(3, 2)]
+        [InlineData(1, int.MaxValue)]
+        public void Constructor_InvalidSlice_Throws(int offset, int length)
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(() => new BinaryParser(new byte[4], offset, length));
+        }
+
+        [Fact]
+        public void ReadString_NegativeLength_Throws()
+        {
+            var parser = new BinaryParser(new byte[4]);
+            Assert.Throws<ArgumentOutOfRangeException>(() => parser.ReadString(-1));
+        }
+
+        [Fact]
+        public void CreateSubParser_NegativeLength_Throws()
+        {
+            var parser = new BinaryParser(new byte[4]);
+            Assert.Throws<ArgumentOutOfRangeException>(() => parser.CreateSubParser(-1));
+        }
+
+        [Fact]
+        public void ReadUInt32_UnalignedOffset_ReadsNetworkOrder()
+        {
+            var parser = new BinaryParser(new byte[] { 255, 0, 0, 1, 0 }, 1, 4);
+            Assert.Equal(256u, parser.ReadUInt32());
+        }
+
         // ─── Bool ────────────────────────────────────────────────────────────────
 
         [Theory]

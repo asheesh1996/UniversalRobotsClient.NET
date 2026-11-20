@@ -1,0 +1,10 @@
+{
+  "upstream": "https://github.com/UniversalRobots/Universal_Robots_Client_Library",
+  "baseline": "757d512",
+  "target": "d00cd65",
+  "commitCount": 70,
+  "baselineEvidence": "C++ reflog: June 30 checkout at 757d512 immediately before initial C# commit 31cdc52; September 30 fast-forward to d00cd65.",
+  "csharpBaseline": "f1d403c",
+  "errorCatalogVersion": "42.0.0",
+  "status": "Reviewed range; applicable ports and known pre-existing gaps documented. Not full hardware-certified parity."
+}

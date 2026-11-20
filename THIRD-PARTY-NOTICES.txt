@@ -1,0 +1,8 @@
+This managed implementation follows protocols and behavior from UniversalRobots/Universal_Robots_Client_Library.
+Reviewed upstream snapshot: d00cd65, following baseline 757d512 (70 commits).
+
+The external_control.urscript asset is imported unchanged from that snapshot under the upstream Apache-2.0 license; see LICENSE.
+The error text data is generated from include/ur_client_library/ur/error_code_texts.h (UR ErrorCodes JSON v42.0.0).
+Copyright 2026 Universal Robots A/S. The source and binary redistribution conditions and disclaimer for this data are reproduced in UPSTREAM-DATA-LICENSE.txt.
+
+NuGet dependencies retain their respective licenses. No vendored C++ networking, JSON library, or native binary is included.

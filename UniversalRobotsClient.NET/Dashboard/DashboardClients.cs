@@ -233,104 +233,123 @@ namespace UniversalRobotics.Dashboard
     // ─── PolyScope X Dashboard Client (REST/JSON) ─────────────────────────────────
 
     /// <summary>
-    /// Connects to the UR Robot API (PolyScope X 10.11.0+) via HTTP REST on port 29999.
+    /// Connects to the UR Robot API (PolyScope X) via HTTP REST on port 80.
     /// All responses are JSON-encoded. Replaces the C++ <c>DashboardClientImplementationX</c> class.
     /// </summary>
-    public sealed class DashboardClientX : IDisposable
+    public sealed partial class DashboardClientX : IDisposable
     {
         private readonly HttpClient _http;
-        private readonly string _baseUrl;
         private readonly ILogger _logger;
+        private readonly bool _ownsHttpClient;
+        private const string ApiRoot = "/universal-robots/robot-api";
+
+        /// <summary>Robot API version discovered from its OpenAPI document.</summary>
+        public UniversalRobotics.Models.VersionInformation? ApiVersion { get; private set; }
+
+        /// <summary>Per-request timeout, including response body transfer.</summary>
+        public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
         /// <summary>
         /// Creates a PolyScope X dashboard client.
         /// </summary>
         /// <param name="host">Robot IP address.</param>
-        /// <param name="port">HTTP port (default 29999).</param>
+        /// <param name="port">HTTP port (default 80, distinct from the G5 dashboard port).</param>
         /// <param name="logger">Optional logger.</param>
-        public DashboardClientX(string host, int port = 29999, ILogger? logger = null)
+        public DashboardClientX(string host, int port = 80, ILogger? logger = null)
         {
-            _baseUrl = $"http://{host}:{port}";
             _logger = logger ?? NullLogger.Instance;
-            _http = new HttpClient { BaseAddress = new Uri(_baseUrl), Timeout = TimeSpan.FromSeconds(10) };
+            _http = new HttpClient { BaseAddress = new UriBuilder("http", host, port).Uri, Timeout = Timeout.InfiniteTimeSpan };
+            _ownsHttpClient = true;
         }
 
-        /// <summary>Verifies connectivity to the Robot API (no-op; HTTP is connectionless).</summary>
-        public Task ConnectAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        /// <summary>Uses a caller-owned HTTP client, whose BaseAddress identifies the controller.</summary>
+        public DashboardClientX(HttpClient httpClient, ILogger? logger = null)
+        {
+            _http = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+            if (_http.BaseAddress == null) throw new ArgumentException("BaseAddress is required.", nameof(httpClient));
+            _logger = logger ?? NullLogger.Instance;
+        }
+
+        /// <summary>Verifies the Robot API endpoint and discovers its version.</summary>
+        public async Task ConnectAsync(CancellationToken cancellationToken = default)
+        {
+            var response = await SendAsync(HttpMethod.Get, "/openapi.json", cancellationToken).ConfigureAwait(false);
+            if (!response.Success) throw new CommunicationException(response.RawResponse ?? "Robot API connection failed.");
+            using var document = JsonDocument.Parse(response.RawResponse!);
+            ApiVersion = UniversalRobotics.Models.VersionInformation.Parse(document.RootElement.GetProperty("info").GetProperty("version").GetString()!);
+        }
 
         // ─── Commands ────────────────────────────────────────────────────────────
 
         /// <summary>Requests the robot to power on.</summary>
         public Task<DashboardResponse> PowerOnAsync(CancellationToken ct = default)
-            => PostAsync("/universal-robots/v1/robot/power-on", ct);
+            => SendAsync(HttpMethod.Put, "/robotstate/v1/state", ct, new { action = "POWER_ON" });
 
         /// <summary>Requests the robot to power off.</summary>
         public Task<DashboardResponse> PowerOffAsync(CancellationToken ct = default)
-            => PostAsync("/universal-robots/v1/robot/power-off", ct);
+            => SendAsync(HttpMethod.Put, "/robotstate/v1/state", ct, new { action = "POWER_OFF" });
 
         /// <summary>Releases the brakes.</summary>
         public Task<DashboardResponse> BrakeReleaseAsync(CancellationToken ct = default)
-            => PostAsync("/universal-robots/v1/robot/brake-release", ct);
+            => SendAsync(HttpMethod.Put, "/robotstate/v1/state", ct, new { action = "BRAKE_RELEASE" });
 
         /// <summary>Pauses the currently running program.</summary>
         public Task<DashboardResponse> PauseAsync(CancellationToken ct = default)
-            => PostAsync("/universal-robots/v1/robot/pause", ct);
+            => SendAsync(HttpMethod.Put, "/program/v1/state", ct, new { action = "pause" });
 
         /// <summary>Resumes a paused program.</summary>
         public Task<DashboardResponse> ResumeAsync(CancellationToken ct = default)
-            => PostAsync("/universal-robots/v1/robot/play", ct);
+            => SendAsync(HttpMethod.Put, "/program/v1/state", ct, new { action = "resume" });
 
         /// <summary>Stops the currently running program.</summary>
         public Task<DashboardResponse> StopAsync(CancellationToken ct = default)
-            => PostAsync("/universal-robots/v1/robot/stop", ct);
+            => SendAsync(HttpMethod.Put, "/program/v1/state", ct, new { action = "stop" });
 
         /// <summary>Queries the robot state.</summary>
         public Task<DashboardResponse> GetRobotStateAsync(CancellationToken ct = default)
-            => GetAsync("/universal-robots/v1/robot/state", ct);
+            => SendAsync(HttpMethod.Get, "/robotstate/v1/state", ct);
 
         /// <summary>Closes the safety popup.</summary>
         public Task<DashboardResponse> CloseSafetyPopupAsync(CancellationToken ct = default)
-            => PostAsync("/universal-robots/v1/safety/close-popup", ct);
+            => SendVersionedAsync(HttpMethod.Delete, "/popup/v1/safety", "5.0.107", ct);
 
         // ─── HTTP helpers ────────────────────────────────────────────────────────
 
-        private async Task<DashboardResponse> GetAsync(string path, CancellationToken ct)
+        private async Task<DashboardResponse> SendAsync(HttpMethod method, string path, CancellationToken ct, object? payload = null, TimeSpan? timeout = null)
         {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            linked.CancelAfter(timeout ?? RequestTimeout);
+            using var request = new HttpRequestMessage(method, ApiRoot + path);
+            if (payload != null)
+                request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
             try
             {
-                var response = await _http.GetAsync(path, ct).ConfigureAwait(false);
+                using var response = await _http.SendAsync(request, linked.Token).ConfigureAwait(false);
                 var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 var data = ParseJsonResponse(body);
                 return response.IsSuccessStatusCode
                     ? DashboardResponse.Ok(body, data)
                     : DashboardResponse.Fail(body);
             }
-            catch (Exception ex)
+            catch (HttpRequestException ex)
             {
-                _logger.LogWarning(ex, "GET {Path} failed.", path);
+                _logger.LogWarning(ex, "{Method} {Path} failed.", method, path);
                 return DashboardResponse.Fail(ex.Message);
             }
         }
 
-        private async Task<DashboardResponse> PostAsync(string path, CancellationToken ct, string? jsonBody = null)
+        private async Task RequireVersionAsync(string minimum, CancellationToken ct)
         {
-            try
-            {
-                var content = jsonBody != null
-                    ? new StringContent(jsonBody, Encoding.UTF8, "application/json")
-                    : new StringContent(string.Empty);
-                var response = await _http.PostAsync(path, content, ct).ConfigureAwait(false);
-                var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                var data = ParseJsonResponse(body);
-                return response.IsSuccessStatusCode
-                    ? DashboardResponse.Ok(body, data)
-                    : DashboardResponse.Fail(body);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "POST {Path} failed.", path);
-                return DashboardResponse.Fail(ex.Message);
-            }
+            if (ApiVersion == null) await ConnectAsync(ct).ConfigureAwait(false);
+            var version = ApiVersion ?? throw new CommunicationException("Robot API version is unavailable.");
+            if (version < UniversalRobotics.Models.VersionInformation.Parse(minimum))
+                throw new NotSupportedException($"This command requires Robot API {minimum} or newer; connected version is {ApiVersion}.");
+        }
+
+        private async Task<DashboardResponse> SendVersionedAsync(HttpMethod method, string path, string minimum, CancellationToken ct, object? payload = null, TimeSpan? timeout = null)
+        {
+            await RequireVersionAsync(minimum, ct).ConfigureAwait(false);
+            return await SendAsync(method, path, ct, payload, timeout).ConfigureAwait(false);
         }
 
         private static IReadOnlyDictionary<string, string> ParseJsonResponse(string json)
@@ -339,14 +358,18 @@ namespace UniversalRobotics.Dashboard
             try
             {
                 using var doc = JsonDocument.Parse(json);
-                foreach (var prop in doc.RootElement.EnumerateObject())
-                    result[prop.Name] = prop.Value.ToString();
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                    foreach (var prop in doc.RootElement.EnumerateObject())
+                        result[prop.Name] = prop.Value.ToString();
             }
-            catch { /* Not valid JSON — return empty dict */ }
+            catch (JsonException) { return result; }
             return result;
         }
 
         /// <inheritdoc />
-        public void Dispose() => _http.Dispose();
+        public void Dispose()
+        {
+            if (_ownsHttpClient) _http.Dispose();
+        }
     }
 }

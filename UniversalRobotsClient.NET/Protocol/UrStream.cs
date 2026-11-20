@@ -27,6 +27,9 @@ namespace UniversalRobotics.Protocol
         /// <summary>Gets the remote port.</summary>
         public int Port { get; }
 
+        /// <summary>Maximum accepted packet length, including the header. Defaults to 1 MiB.</summary>
+        public int MaxPacketLength { get; set; } = 1024 * 1024;
+
         /// <summary>Gets the current socket state.</summary>
         public SocketState State => _client.State;
 
@@ -73,7 +76,6 @@ namespace UniversalRobotics.Protocol
         /// Reads a full UR protocol packet from the stream.  The packet header is read first to
         /// determine the total length, then the payload bytes are read.
         /// </summary>
-        /// <param name="buffer">Buffer to hold the raw packet bytes.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
         /// <returns>The number of bytes read (full packet including header).</returns>
         /// <exception cref="CommunicationException">On connection errors.</exception>
@@ -85,8 +87,8 @@ namespace UniversalRobotics.Protocol
             await _client.ReadExactlyAsync(headerBuf, 0, headerLength, cancellationToken).ConfigureAwait(false);
 
             int totalLength = _framer.GetPacketLength(headerBuf);
-            if (totalLength < headerLength)
-                throw new CommunicationException($"Malformed packet: reported size {totalLength} is smaller than header {headerLength}.");
+            if (totalLength < headerLength || totalLength > MaxPacketLength)
+                throw new CommunicationException($"Malformed packet: reported size {totalLength} is outside [{headerLength}, {MaxPacketLength}].");
 
             // 2. Allocate buffer and copy header bytes already read
             var packetBuf = new byte[totalLength];
@@ -139,6 +141,8 @@ namespace UniversalRobotics.Protocol
         /// <inheritdoc />
         public int GetPacketLength(byte[] headerBytes)
         {
+            if (headerBytes == null) throw new ArgumentNullException(nameof(headerBytes));
+            if (headerBytes.Length < HeaderLength) throw new ArgumentException(nameof(headerBytes));
             // Bytes 0-1: big-endian uint16 total packet size (includes header)
             return (headerBytes[0] << 8) | headerBytes[1];
         }
@@ -157,6 +161,8 @@ namespace UniversalRobotics.Protocol
         /// <inheritdoc />
         public int GetPacketLength(byte[] headerBytes)
         {
+            if (headerBytes == null) throw new ArgumentNullException(nameof(headerBytes));
+            if (headerBytes.Length < HeaderLength) throw new ArgumentException(nameof(headerBytes));
             // Bytes 0-3: big-endian int32 total packet size (includes the 4 size bytes + 1 type byte)
             int size = System.Net.IPAddress.NetworkToHostOrder(BitConverter.ToInt32(headerBytes, 0));
             return size; // size already includes the header bytes

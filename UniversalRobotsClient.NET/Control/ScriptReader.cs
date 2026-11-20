@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using UniversalRobotics.Exceptions;
 using UniversalRobotics.Models;
 
 namespace UniversalRobotics.Control
@@ -16,8 +17,13 @@ namespace UniversalRobotics.Control
     /// </summary>
     public sealed class ScriptReader
     {
-        private static readonly Regex s_varRegex = new Regex(@"\{\{(\w+)\}\}", RegexOptions.Compiled);
-        private static readonly Regex s_includeRegex = new Regex(@"\{%\s*include\s+(\S+)\s*%\}", RegexOptions.Compiled);
+        private const int MaxIncludeDepth = 32;
+        private readonly object _sync = new object();
+        private readonly HashSet<string> _registeredVariables = new HashSet<string>(StringComparer.Ordinal);
+        /// <summary>When enabled, unresolved replacements fail instead of leaving a placeholder. Enabled by UrDriver.</summary>
+        public bool StrictVariables { get; set; }
+        private static readonly Regex s_varRegex = new Regex(@"\{\{\s*([\w-]+)\s*\}\}", RegexOptions.Compiled, TimeSpan.FromSeconds(1));
+        private static readonly Regex s_includeRegex = new Regex(@"\{%\s*include\s+(['""].+?['""]|\S+)\s*%\}", RegexOptions.Compiled, TimeSpan.FromSeconds(1));
         private static readonly Regex s_ifRegex = new Regex(@"\{%\s*if\s+(.+?)\s*%\}", RegexOptions.Compiled);
         private static readonly Regex s_endifRegex = new Regex(@"\{%\s*endif\s*%\}", RegexOptions.Compiled);
         private static readonly Regex s_versionRegex = new Regex(@"^v(\d+\.\d+(?:\.\d+)?)$", RegexOptions.Compiled);
@@ -32,43 +38,87 @@ namespace UniversalRobotics.Control
         /// <returns>The processed URScript content as a string.</returns>
         public string ReadScript(string filePath, IDictionary<string, object> variables)
         {
-            var content = File.ReadAllText(filePath, Encoding.UTF8);
-            var baseDir = Path.GetDirectoryName(filePath) ?? string.Empty;
-            return ProcessContent(content, variables, baseDir, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            lock (_sync)
+            {
+                _registeredVariables.Clear();
+                var path = Path.GetFullPath(filePath);
+                RejectLinkedPath(path);
+                var root = Path.GetDirectoryName(path)!;
+                return ReadIncludedScript(path, variables, root, new HashSet<string>(PathComparer));
+            }
         }
 
         /// <summary>
         /// Processes URScript template content from a string (without file I/O).
         /// </summary>
         public string ProcessContent(string content, IDictionary<string, object> variables, string baseDir = "")
-            => ProcessContent(content, variables, baseDir, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
-
-        private string ProcessContent(string content, IDictionary<string, object> variables, string baseDir, HashSet<string> visitedIncludes)
         {
-            content = ProcessIncludes(content, variables, baseDir, visitedIncludes);
-            content = ProcessConditionals(content, variables);
+            if (content == null) throw new ArgumentNullException(nameof(content));
+            if (variables == null) throw new ArgumentNullException(nameof(variables));
+            lock (_sync)
+            {
+                _registeredVariables.Clear();
+                var root = Path.GetFullPath(string.IsNullOrEmpty(baseDir) ? "." : baseDir);
+                return ProcessContent(content, variables, root, root, new HashSet<string>(PathComparer));
+            }
+        }
+
+        /// <summary>Whether the last processed template used a given replacement variable.</summary>
+        public bool IsVariableRegistered(string key)
+        {
+            lock (_sync) return _registeredVariables.Contains(key);
+        }
+
+        private static StringComparer PathComparer => Path.DirectorySeparatorChar == '\\' ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+
+        private string ProcessContent(string content, IDictionary<string, object> variables, string baseDir, string rootDir, HashSet<string> visitedIncludes)
+        {
             content = ProcessVariables(content, variables);
+            content = ProcessConditionals(content, variables);
+            content = ProcessIncludes(content, variables, baseDir, rootDir, visitedIncludes);
             return content;
         }
 
         // ─── Include processing ───────────────────────────────────────────────────
 
-        private string ProcessIncludes(string content, IDictionary<string, object> vars, string baseDir, HashSet<string> visited)
+        private string ProcessIncludes(string content, IDictionary<string, object> vars, string baseDir, string rootDir, HashSet<string> visited)
         {
             return s_includeRegex.Replace(content, m =>
             {
-                var includeFile = m.Groups[1].Value;
-                var fullPath = Path.Combine(baseDir, includeFile);
-
-                if (visited.Contains(fullPath))
-                    return string.Empty; // Prevent infinite recursion
-
-                visited.Add(fullPath);
-                if (!File.Exists(fullPath)) return string.Empty;
-
-                var included = File.ReadAllText(fullPath, Encoding.UTF8);
-                return ProcessContent(included, vars, baseDir, visited);
+                var includeFile = m.Groups[1].Value.Trim('"', '\'');
+                if (Path.IsPathRooted(includeFile) || includeFile.IndexOf(':') >= 0 || includeFile.StartsWith("\\", StringComparison.Ordinal))
+                    throw new UrException($"Rooted include paths are not allowed: {includeFile}");
+                var fullPath = Path.GetFullPath(Path.Combine(baseDir, includeFile));
+                var prefix = rootDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                var comparison = Path.DirectorySeparatorChar == '\\' ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                if (!fullPath.StartsWith(prefix, comparison))
+                    throw new UrException($"Include is outside the script root: {includeFile}");
+                RejectLinkedPath(fullPath);
+                return ReadIncludedScript(fullPath, vars, rootDir, visited);
             });
+        }
+
+        private string ReadIncludedScript(string path, IDictionary<string, object> variables, string rootDir, HashSet<string> visited)
+        {
+            if (visited.Count >= MaxIncludeDepth || !visited.Add(path))
+                throw new UrException($"Circular include or maximum include depth exceeded: {path}");
+            try
+            {
+                return ProcessContent(File.ReadAllText(path, Encoding.UTF8), variables, Path.GetDirectoryName(path)!, rootDir, visited);
+            }
+            finally
+            {
+                visited.Remove(path);
+            }
+        }
+
+        private static void RejectLinkedPath(string path)
+        {
+            for (string? current = path; !string.IsNullOrEmpty(current); current = Path.GetDirectoryName(current))
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                    throw new UrException($"Linked script paths are not supported: {current}");
+            }
         }
 
         // ─── Conditional processing ───────────────────────────────────────────────
@@ -77,7 +127,7 @@ namespace UniversalRobotics.Control
         {
             var result = new StringBuilder();
             var lines = content.Split('\n');
-            var stack = new Stack<bool>();
+            var stack = new Stack<(bool Parent, bool Taken, bool HasElse)>();
             bool active = true;
 
             foreach (var rawLine in lines)
@@ -88,14 +138,28 @@ namespace UniversalRobotics.Control
                 if (ifMatch.Success)
                 {
                     var condition = EvaluateCondition(ifMatch.Groups[1].Value.Trim(), vars);
-                    stack.Push(active);
+                    stack.Push((active, condition, false));
                     active = active && condition;
+                    continue;
+                }
+
+                var branch = Regex.Match(line, @"\{%\s*(elif\s+(.+?)|else)\s*%\}", RegexOptions.None, TimeSpan.FromSeconds(1));
+                if (branch.Success)
+                {
+                    if (stack.Count == 0) throw new UrException("Unmatched template branch.");
+                    var frame = stack.Pop();
+                    if (frame.HasElse) throw new UrException("Template branch after else.");
+                    bool isElse = branch.Groups[1].Value == "else";
+                    bool selected = !frame.Taken && (isElse || EvaluateCondition(branch.Groups[2].Value, vars));
+                    active = frame.Parent && selected;
+                    stack.Push((frame.Parent, frame.Taken || selected, isElse));
                     continue;
                 }
 
                 if (s_endifRegex.IsMatch(line))
                 {
-                    active = stack.Count > 0 ? stack.Pop() : true;
+                    if (stack.Count == 0) throw new UrException("Unmatched template endif.");
+                    active = stack.Pop().Parent;
                     continue;
                 }
 
@@ -106,6 +170,7 @@ namespace UniversalRobotics.Control
                 }
             }
 
+            if (stack.Count != 0) throw new UrException("Unclosed template if.");
             return result.ToString();
         }
 
@@ -157,11 +222,13 @@ namespace UniversalRobotics.Control
 
         // ─── Variable substitution ────────────────────────────────────────────────
 
-        private static string ProcessVariables(string content, IDictionary<string, object> vars)
+        private string ProcessVariables(string content, IDictionary<string, object> vars)
         {
             return s_varRegex.Replace(content, m =>
             {
                 var name = m.Groups[1].Value;
+                _registeredVariables.Add(name);
+                if (StrictVariables && !vars.ContainsKey(name)) throw new UrException($"Unknown script variable: {name}");
                 return vars.TryGetValue(name, out var val) ? FormatValue(val) : m.Value;
             });
         }

@@ -18,12 +18,16 @@ namespace UniversalRobotics.Protocol
         private readonly int _end;
 
         /// <summary>Initializes a parser over the entire provided buffer.</summary>
-        public BinaryParser(byte[] buffer) : this(buffer, 0, buffer.Length) { }
+        public BinaryParser(byte[] buffer) : this(buffer, 0, buffer?.Length ?? throw new ArgumentNullException(nameof(buffer))) { }
 
         /// <summary>Initializes a parser over a slice of the buffer.</summary>
         public BinaryParser(byte[] buffer, int offset, int length)
         {
             _buffer = buffer ?? throw new ArgumentNullException(nameof(buffer));
+            if (offset < 0 || offset > buffer.Length)
+                throw new ArgumentOutOfRangeException(nameof(offset));
+            if (length < 0 || length > buffer.Length - offset)
+                throw new ArgumentOutOfRangeException(nameof(length));
             _position = offset;
             _end = offset + length;
         }
@@ -37,6 +41,8 @@ namespace UniversalRobotics.Protocol
         /// <summary>Creates a sub-parser that spans the next <paramref name="length"/> bytes and advances this parser.</summary>
         public BinaryParser CreateSubParser(int length)
         {
+            if (length < 0)
+                throw new ArgumentOutOfRangeException(nameof(length));
             if (length > RemainingBytes)
                 throw new InvalidOperationException($"Cannot create sub-parser of {length} bytes; only {RemainingBytes} remain.");
             var sub = new BinaryParser(_buffer, _position, length);
@@ -172,6 +178,8 @@ namespace UniversalRobotics.Protocol
 
         private int Advance(int count)
         {
+            if (count < 0)
+                throw new ArgumentOutOfRangeException(nameof(count));
             if (count > RemainingBytes)
                 throw new InvalidOperationException(
                     $"Cannot read {count} byte(s) from parser; only {RemainingBytes} remain.");

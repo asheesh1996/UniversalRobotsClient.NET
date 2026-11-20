@@ -1,6 +1,8 @@
 ﻿// Universal Robots .NET Client Library — Example Programs
 // Licensed under the Apache License, Version 2.0
 
+#nullable enable
+
 using System;
 using System.Collections.Generic;
 using System.Net.Sockets;
@@ -307,7 +309,7 @@ sealed class InlineConsoleLogger : ILogger
     private readonly string _category;
     public InlineConsoleLogger(string category) => _category = category;
 
-    public IDisposable BeginScope<TState>(TState state) => NullScope.Instance;
+    public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
     public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Debug;
 
     public void Log<TState>(

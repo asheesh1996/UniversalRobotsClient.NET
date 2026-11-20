@@ -190,6 +190,29 @@ namespace UniversalRobotics.Tests
         }
     }
 
+    public class RobotSeriesHelperTests
+    {
+        [Theory]
+        [InlineData(12, "10.15.0", RobotSeries.GSeries)]
+        [InlineData(13, "10.15.0", RobotSeries.GSeries)]
+        [InlineData(14, "10.15.0", RobotSeries.GSeries)]
+        [InlineData(12, "10.14.0", RobotSeries.Undefined)]
+        public void GetSeries_GSeriesModels_UsesVersionGate(int modelId, string versionText, RobotSeries expected)
+        {
+            var model = (RobotType)modelId;
+
+            Assert.Equal(expected, RobotSeriesHelper.GetSeries(model, VersionInformation.Parse(versionText)));
+        }
+
+        [Fact]
+        public void GetSeries_UsesModelAndVersionTogether()
+        {
+            Assert.Equal(RobotSeries.Cb3, RobotSeriesHelper.GetSeries(RobotType.Ur5, VersionInformation.Parse("3.14.3")));
+            Assert.Equal(RobotSeries.ESeries, RobotSeriesHelper.GetSeries(RobotType.Ur5, VersionInformation.Parse("5.12.0")));
+            Assert.Equal(RobotSeries.UrSeries, RobotSeriesHelper.GetSeries(RobotType.Ur20, VersionInformation.Parse("10.7.0")));
+        }
+    }
+
     public class ControlModeTests
     {
         [Fact]

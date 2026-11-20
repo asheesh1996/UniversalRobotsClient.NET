@@ -88,7 +88,9 @@ namespace UniversalRobotics.Primary.Packets
         /// <summary>Runtime exception message from URScript execution.</summary>
         RuntimeException = 10,
         /// <summary>Software version message (first message on connection).</summary>
-        Version = 3  // NOTE: same value as Configuration; context distinguishes them
+        Version = 3,
+        /// <summary>Hardware identity information from newer controllers.</summary>
+        HardwareInfo = 18
     }
 
     /// <summary>
@@ -140,17 +142,35 @@ namespace UniversalRobotics.Primary.Packets
         /// <summary>Gets the error argument (context-specific meaning).</summary>
         public uint ErrorArgument { get; private set; }
 
+        /// <summary>Controller report severity.</summary>
+        public int ReportLevel { get; private set; }
+        /// <summary>Additional data format identifier.</summary>
+        public uint DataType { get; private set; }
+        /// <summary>Additional numeric data.</summary>
+        public uint Data { get; private set; }
+        /// <summary>Additional controller text.</summary>
+        public string Text { get; private set; } = string.Empty;
+
         /// <inheritdoc />
         protected override bool ParsePayload(BinaryParser parser)
         {
-            if (parser.RemainingBytes < 8) return false;
+            if (parser.RemainingBytes < 20) return false;
             ErrorCode = parser.ReadUInt32();
             ErrorArgument = parser.ReadUInt32();
+            ReportLevel = parser.ReadInt32();
+            DataType = parser.ReadUInt32();
+            Data = parser.ReadUInt32();
+            Text = parser.ReadString(parser.RemainingBytes);
             return true;
         }
 
         /// <inheritdoc />
-        public override string ToDebugString() => $"ErrorCodeMessage {{ Code=0x{ErrorCode:X8}, Arg={ErrorArgument} }}";
+        public override string ToDebugString()
+        {
+            var code = $"C{ErrorCode}A{ErrorArgument}";
+            var text = ErrorCodeTexts.GetText(ErrorCode, ErrorArgument);
+            return text == null ? code : code + ": " + text;
+        }
     }
 
     // ─── Runtime Exception Message ────────────────────────────────────────────────
@@ -195,9 +215,12 @@ namespace UniversalRobotics.Primary.Packets
         /// <inheritdoc />
         protected override bool ParsePayload(BinaryParser parser)
         {
-            if (parser.RemainingBytes < 16) return false;
-            uint major = parser.ReadUInt32();
-            uint minor = parser.ReadUInt32();
+            if (parser.RemainingBytes < 1) return false;
+            var projectNameLength = parser.ReadByte();
+            if (parser.RemainingBytes < projectNameLength + 10) return false;
+            parser.ReadString(projectNameLength);
+            uint major = parser.ReadByte();
+            uint minor = parser.ReadByte();
             uint bugfix = parser.ReadUInt32();
             uint build = parser.ReadUInt32();
             Version = new VersionInformation(major, minor, bugfix, build);
@@ -287,33 +310,35 @@ namespace UniversalRobotics.Primary.Packets
         /// <inheritdoc />
         public override bool ParseFrom(BinaryParser parser)
         {
+            SubPackages.Clear();
             while (!parser.IsEmpty)
             {
-                if (parser.RemainingBytes < 5) break;
+                if (parser.RemainingBytes < 5) return false;
                 int subSize = parser.ReadInt32();
                 byte subType = parser.ReadByte();
                 int payloadSize = subSize - 5;
 
-                if (payloadSize < 0 || payloadSize > parser.RemainingBytes) break;
+                if (payloadSize < 0 || payloadSize > parser.RemainingBytes) return false;
 
                 var subParser = parser.CreateSubParser(payloadSize);
                 var subPkg = CreateSubPackage(subType, subParser);
+                if (subPkg == null) return false;
                 SubPackages.Add(subPkg);
             }
             return true;
         }
 
-        private PrimaryPackage CreateSubPackage(byte type, BinaryParser parser)
+        private PrimaryPackage? CreateSubPackage(byte type, BinaryParser parser)
         {
             PrimaryPackage pkg = type switch
             {
                 0 => new RobotModeDataPackage(),
                 1 => new JointDataPackage(),
                 4 => new MasterboardDataPackage(),
+                6 => new ConfigurationDataPackage(),
                 _ => new UnknownPrimaryPackage((RobotPackageType)type)
             };
-            pkg.ParseFrom(parser);
-            return pkg;
+            return pkg.ParseFrom(parser) ? pkg : null;
         }
 
         /// <inheritdoc />

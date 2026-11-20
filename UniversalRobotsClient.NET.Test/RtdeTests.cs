@@ -104,6 +104,15 @@ namespace UniversalRobotics.Tests
 
     public class RtdeTypeMapTests
     {
+        [Fact]
+        public void InvalidKeyException_CopiesMissingFields()
+        {
+            var keys = new List<string> { "unavailable_first", "unavailable_second" };
+            var exception = new UniversalRobotics.Exceptions.RtdeInvalidKeyException(keys);
+            keys.Clear();
+            Assert.Equal(new[] { "unavailable_first", "unavailable_second" }, exception.MissingKeys);
+        }
+
         [Theory]
         [InlineData("BOOL", RtdeValueKind.Bool)]
         [InlineData("DOUBLE", RtdeValueKind.Double)]

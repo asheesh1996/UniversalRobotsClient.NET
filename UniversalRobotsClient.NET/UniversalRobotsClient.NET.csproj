@@ -8,13 +8,35 @@
     <AssemblyName>UniversalRobotsClient.NET</AssemblyName>
     <Description>Native managed C# client library for Universal Robots robot controllers. Implements RTDE, Primary, Dashboard, and motion control protocols.</Description>
     <Authors>Asheesh Maheshwari</Authors>
+    <PackageId>UniversalRobotsClient.NET</PackageId>
+    <Version>0.1.0-preview.1</Version>
+    <PackageTags>UniversalRobots;robotics;RTDE;URSim;URScript</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl Condition="'$(RepositoryUrl)' == '' and '$(GITHUB_REPOSITORY)' != ''">https://github.com/$(GITHUB_REPOSITORY)</RepositoryUrl>
+    <PackageProjectUrl Condition="'$(RepositoryUrl)' != ''">$(RepositoryUrl)</PackageProjectUrl>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <DebugType>portable</DebugType>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="/" />
+    <None Include="../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="../UPSTREAM-DATA-LICENSE.txt" Pack="true" PackagePath="/" />
+    <None Include="../THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="/" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+    <EmbeddedResource Include="Resources/error-code-texts.json" LogicalName="UniversalRobotics.error-code-texts.json" />
+    <None Update="Resources/external_control.urscript" Pack="true" PackagePath="contentFiles/any/any/resources/external_control.urscript" PackageCopyToOutput="true" CopyToOutputDirectory="PreserveNewest" TargetPath="resources/external_control.urscript" />
     <!-- Microsoft BCL package for JSON parsing (PolyScope X REST API) -->
-    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <PackageReference Include="System.Text.Json" Version="8.0.6" />
     <!-- Microsoft.Extensions.Logging.Abstractions for pluggable logging -->
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
   </ItemGroup>

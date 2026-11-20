@@ -58,7 +58,11 @@ namespace UniversalRobotics.Control
         /// <summary>No operation (keep alive).</summary>
         Noop = 0,
         /// <summary>Starts sending trajectory points.</summary>
-        Start = 1
+        Start = 1,
+        /// <summary>Starts an open-ended trajectory; point count is ignored.</summary>
+        StreamStart = 2,
+        /// <summary>Ends an open-ended trajectory; point count is the total sent since StreamStart.</summary>
+        StreamEnd = 3
     }
 
     /// <summary>Control messages sent via the reverse interface for freedrive mode.</summary>

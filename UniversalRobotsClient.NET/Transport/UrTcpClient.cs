@@ -20,6 +20,7 @@ namespace UniversalRobotics.Transport
         private volatile SocketState _state = SocketState.Invalid;
         private readonly object _lock = new object();
         private bool _disposed;
+        private CancellationTokenSource? _connectionCancellation;
 
         /// <summary>Default time to wait between connection attempts (10 seconds, matching C++ default).</summary>
         public static readonly TimeSpan DefaultReconnectionTime = TimeSpan.FromSeconds(10);
@@ -48,39 +49,76 @@ namespace UniversalRobotics.Transport
             CancellationToken cancellationToken = default)
         {
             var delay = reconnectionDelay ?? DefaultReconnectionTime;
+            CancellationTokenSource connectionCancellation;
+            lock (_lock)
+            {
+                if (_disposed) throw new ObjectDisposedException(nameof(UrTcpClient));
+                _connectionCancellation?.Cancel();
+                _connectionCancellation = connectionCancellation = new CancellationTokenSource();
+            }
+            using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken, connectionCancellation.Token);
+            var token = linkedCancellation.Token;
             int attempt = 0;
 
-            while (!cancellationToken.IsCancellationRequested)
+            try
             {
-                attempt++;
-                try
+                while (true)
                 {
+                    token.ThrowIfCancellationRequested();
+                    attempt++;
                     var client = new TcpClient();
-                    client.NoDelay = true;
-                    await client.ConnectAsync(host, port).ConfigureAwait(false);
-
-                    lock (_lock)
+                    bool connected = false;
+                    try
                     {
-                        _tcpClient?.Close();
-                        _tcpClient = client;
-                        _stream = client.GetStream();
-                        _state = SocketState.Connected;
+                        client.NoDelay = true;
+                        using (token.Register(client.Close))
+                            await client.ConnectAsync(host, port).ConfigureAwait(false);
+
+                        lock (_lock)
+                        {
+                            token.ThrowIfCancellationRequested();
+                            _tcpClient?.Close();
+                            _tcpClient = client;
+                            _stream = client.GetStream();
+                            _state = SocketState.Connected;
+                            connected = true;
+                        }
+                        return true;
                     }
-                    return true;
-                }
-                catch (SocketException) when (maxAttempts == 0 || attempt < maxAttempts)
-                {
-                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-                }
-                catch (SocketException ex)
-                {
-                    _state = SocketState.Invalid;
-                    throw new CommunicationException(
-                        $"Failed to connect to {host}:{port} after {attempt} attempt(s).", ex);
+                    catch (SocketException) when (token.IsCancellationRequested)
+                    {
+                        throw new OperationCanceledException(token);
+                    }
+                    catch (ObjectDisposedException) when (token.IsCancellationRequested)
+                    {
+                        throw new OperationCanceledException(token);
+                    }
+                    catch (SocketException) when (maxAttempts == 0 || attempt < maxAttempts)
+                    {
+                        await Task.Delay(delay, token).ConfigureAwait(false);
+                    }
+                    catch (SocketException ex)
+                    {
+                        _state = SocketState.Invalid;
+                        throw new CommunicationException(
+                            $"Failed to connect to {host}:{port} after {attempt} attempt(s).", ex);
+                    }
+                    finally
+                    {
+                        if (!connected) client.Dispose();
+                    }
                 }
             }
-
-            return false;
+            finally
+            {
+                lock (_lock)
+                {
+                    if (ReferenceEquals(_connectionCancellation, connectionCancellation))
+                        _connectionCancellation = null;
+                    connectionCancellation.Dispose();
+                }
+            }
         }
 
         /// <summary>Closes the socket and transitions to the <see cref="SocketState.Disconnected"/> state.</summary>
@@ -88,6 +126,7 @@ namespace UniversalRobotics.Transport
         {
             lock (_lock)
             {
+                _connectionCancellation?.Cancel();
                 _stream?.Close();
                 _tcpClient?.Close();
                 _stream = null;
